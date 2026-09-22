@@ -1,3 +1,5 @@
+import { apiOrigin } from "./origin";
+
 export type TokenStore = {
   get(): Promise<string | null>;
   set(token: string): Promise<void>;
@@ -115,4 +117,4 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
   };
 }
 
-export const API_BASE_URL = "http://127.0.0.1:8787";
+export const API_BASE_URL = apiOrigin();
