@@ -12,6 +12,7 @@ export function createTestApp(
     accountEmail: "recruiter@example.com",
     accountPassword: "sitting-password",
     evaluationsEnabled: true,
+    dailySpendCapUsd: 5,
     host: "127.0.0.1",
     port: 8787,
     llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },

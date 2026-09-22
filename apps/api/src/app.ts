@@ -15,7 +15,7 @@ import {
   type Criterion,
 } from "@decision-assistant/domain";
 import { createHash } from "node:crypto";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, lt } from "drizzle-orm";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { z } from "zod";
@@ -211,7 +211,11 @@ export function createApp(deps: {
         return c.json({ error: "evaluation_in_progress" }, 409);
       }
     }
-    const gate = preflight({ evaluationsEnabled: deps.env.evaluationsEnabled, successCount });
+    if (!deps.env.evaluationsEnabled) return c.json({ error: "evaluations_disabled" }, 503);
+    if (spendToday(db, user.id) >= deps.env.dailySpendCapUsd) {
+      return c.json({ error: "daily_spend_cap" }, 503);
+    }
+    const gate = preflight({ evaluationsEnabled: true, successCount });
     if (!gate.proceed) {
       if (gate.reason === "kill_switch") return c.json({ error: "evaluations_disabled" }, 503);
       const refusedAt = Date.now();
@@ -474,6 +478,22 @@ function ownedEvaluation(db: AppDatabase, evaluationId: string, userId: string) 
     .from(evaluations)
     .where(and(eq(evaluations.id, evaluationId), eq(evaluations.userId, userId)))
     .get();
+}
+
+function spendToday(db: AppDatabase, userId: string, now = Date.now()) {
+  const day = new Date(now);
+  const start = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+  const end = start + 86_400_000;
+  const rows = db
+    .select()
+    .from(evaluations)
+    .where(and(eq(evaluations.userId, userId), gte(evaluations.createdAt, start), lt(evaluations.createdAt, end)))
+    .all();
+  return rows.reduce(
+    (sum, row) =>
+      sum + (row.jevInputUsd ?? 0) + (row.jevOutputUsd ?? 0) + (row.llmInputUsd ?? 0) + (row.llmOutputUsd ?? 0),
+    0,
+  );
 }
 
 function ownedRubric(db: AppDatabase, rubricVersionId: string, userId: string) {

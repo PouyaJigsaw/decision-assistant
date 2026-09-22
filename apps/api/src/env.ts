@@ -4,6 +4,7 @@ export type Env = {
   accountEmail: string;
   accountPassword: string;
   evaluationsEnabled: boolean;
+  dailySpendCapUsd: number;
   host: string;
   port: number;
   providers: "fake" | "live";
@@ -33,6 +34,7 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): Env {
     accountEmail,
     accountPassword,
     evaluationsEnabled: source.EVALUATIONS_ENABLED !== "false",
+    dailySpendCapUsd: readPrice(source.DAILY_SPEND_CAP_USD, 5),
     host: source.HOST ?? "127.0.0.1",
     port: Number(source.PORT ?? 8787),
     providers: source.PROVIDERS === "fake" ? "fake" : "live",

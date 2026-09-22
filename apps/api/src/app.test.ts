@@ -3,7 +3,7 @@ import type { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { getEvaluation } from "./app";
 import { createTestApp, signIn } from "./app.test-helpers";
-import { evaluations, trialUses } from "./db/schema";
+import { evaluations, trialUses, users } from "./db/schema";
 import { FakeJev } from "./providers/fake-jev";
 import { FakeLlm } from "./providers/fake-llm";
 import { createRuntimeProviders } from "./providers/runtime-fakes";
@@ -684,6 +684,79 @@ describe("POST /v1/evaluations", () => {
     expect(getEvaluation(db, created.id)).toBeUndefined();
     const me = await app.request("/v1/me", { headers });
     expect(await me.json()).toMatchObject({ successCount: 1, usesRemaining: 2 });
+  });
+});
+
+function utcMidnight(daysAgo = 0) {
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - daysAgo);
+}
+
+function insertSpendRow(
+  db: ReturnType<typeof createTestApp>["db"],
+  userId: string,
+  roleId: string,
+  rubricVersionId: string,
+  createdAt: number,
+  jevTotal: number,
+  llmTotal: number,
+) {
+  db.insert(evaluations)
+    .values({
+      id: crypto.randomUUID(),
+      userId,
+      roleId,
+      rubricVersionId,
+      idempotencyKey: crypto.randomUUID(),
+      bodyHash: `spend-${createdAt}`,
+      status: "success",
+      countsAsUse: 0,
+      jevInputUsd: jevTotal,
+      jevOutputUsd: 0,
+      llmInputUsd: llmTotal,
+      llmOutputUsd: 0,
+      keepExtracts: 0,
+      comparisonEnabled: 1,
+      createdAt,
+      updatedAt: createdAt,
+    })
+    .run();
+}
+
+describe("daily spend cap", () => {
+  it("returns 503 and calls nothing when today's stored spend is already at the cap", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm, env: { dailySpendCapUsd: 5 } });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const user = db.select().from(users).get();
+    insertSpendRow(db, user!.id, role.id, rubric.id, Date.now(), 4, 1);
+
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "daily_spend_cap" });
+    expect(jev.calls).toBe(0);
+  });
+
+  it("does not count yesterday's spend against today's cap", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm, env: { dailySpendCapUsd: 5 } });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const user = db.select().from(users).get();
+    insertSpendRow(db, user!.id, role.id, rubric.id, utcMidnight(1) - 1, 9, 0);
+
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "f2f2f2f2-f2f2-42f2-82f2-f2f2f2f2f2f2" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(200);
+    expect(jev.calls).toBe(1);
   });
 });
 
