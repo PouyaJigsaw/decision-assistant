@@ -7,7 +7,11 @@ describe("readEnv", () => {
     expect(() => readEnv({ ACCOUNT_EMAIL: "recruiter@example.com" })).toThrow(/ACCOUNT_PASSWORD/);
   });
 
-  const credentials = { ACCOUNT_EMAIL: "recruiter@example.com", ACCOUNT_PASSWORD: "sitting-password" };
+  const credentials = {
+    ACCOUNT_EMAIL: "recruiter@example.com",
+    ACCOUNT_PASSWORD: "sitting-password",
+    DATABASE_PATH: "data/decision-assistant.db",
+  };
 
   it("binds the local API to loopback by default", () => {
     expect(readEnv(credentials).host).toBe("127.0.0.1");
@@ -51,6 +55,15 @@ describe("readEnv", () => {
         LLM_INPUT_USD_PER_MILLION: "4",
       }).llmPrice,
     ).toEqual({ inputUsdPerMillion: 4, outputUsdPerMillion: 15 });
+  });
+
+  it("requires DATABASE_PATH and returns the hosted volume path when set", () => {
+    expect(() =>
+      readEnv({ ACCOUNT_EMAIL: "recruiter@example.com", ACCOUNT_PASSWORD: "sitting-password" }),
+    ).toThrow("DATABASE_PATH is required");
+    expect(readEnv({ ...credentials, DATABASE_PATH: "/data/decision-assistant.db" }).databasePath).toBe(
+      "/data/decision-assistant.db",
+    );
   });
 
   it("throws when resolved prices are not finite or are negative", () => {

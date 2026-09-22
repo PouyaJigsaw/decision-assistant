@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { serve } from "@hono/node-server";
 import { createApp } from "./app";
 import { seedUser } from "./auth";
@@ -10,8 +9,7 @@ import { createRuntimeProviders } from "./providers/runtime-fakes";
 import type { JevClient, LlmClient } from "./providers/types";
 
 const env = readEnv();
-mkdirSync("data", { recursive: true });
-const db = openDatabase("data/decision-assistant.db");
+const db = openDatabase(env.databasePath);
 seedUser(db, env);
 
 let jev: JevClient;

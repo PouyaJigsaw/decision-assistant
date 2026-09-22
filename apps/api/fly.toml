@@ -1,0 +1,19 @@
+app = "decision-assistant"
+primary_region = "sjc"
+
+[build]
+  dockerfile = "apps/api/Dockerfile"
+
+[env]
+  PORT = "8080"
+  HOST = "0.0.0.0"
+  DATABASE_PATH = "/data/decision-assistant.db"
+  PROVIDERS = "live"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+
+[mounts]
+  source = "decision_data"
+  destination = "/data"

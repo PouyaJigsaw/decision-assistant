@@ -13,6 +13,7 @@ export function createTestApp(
     accountPassword: "sitting-password",
     evaluationsEnabled: true,
     dailySpendCapUsd: 5,
+    databasePath: ":memory:",
     host: "127.0.0.1",
     port: 8787,
     llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },

@@ -5,6 +5,7 @@ export type Env = {
   accountPassword: string;
   evaluationsEnabled: boolean;
   dailySpendCapUsd: number;
+  databasePath: string;
   host: string;
   port: number;
   providers: "fake" | "live";
@@ -28,6 +29,8 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const accountPassword = source.ACCOUNT_PASSWORD ?? "";
   if (!accountEmail) throw new Error("ACCOUNT_EMAIL is required");
   if (!accountPassword) throw new Error("ACCOUNT_PASSWORD is required");
+  const databasePath = source.DATABASE_PATH ?? "";
+  if (!databasePath) throw new Error("DATABASE_PATH is required");
   const inputFallback = Number(source.LLM_INPUT_USD_PER_MILLION ?? 3);
   const outputFallback = Number(source.LLM_OUTPUT_USD_PER_MILLION ?? 15);
   return {
@@ -35,6 +38,7 @@ export function readEnv(source: NodeJS.ProcessEnv = process.env): Env {
     accountPassword,
     evaluationsEnabled: source.EVALUATIONS_ENABLED !== "false",
     dailySpendCapUsd: readPrice(source.DAILY_SPEND_CAP_USD, 5),
+    databasePath,
     host: source.HOST ?? "127.0.0.1",
     port: Number(source.PORT ?? 8787),
     providers: source.PROVIDERS === "fake" ? "fake" : "live",
