@@ -1,3 +1,5 @@
+import type { Criterion, TokenUsage } from "@decision-assistant/domain";
+
 export interface JevClient {
   calls: number;
   evaluate(input: { state: string; questions: Record<string, unknown> }): Promise<
@@ -10,15 +12,12 @@ export interface LlmClient {
   calls: number;
   draftRubric(notes: string): Promise<{
     model: string;
-    criteria: { kind: string; label: string; prompt: string }[];
-    usage: { inputTokens: number; outputTokens: number };
+    criteria: { kind: Criterion["kind"]; label: string; prompt: string }[];
+    usage: TokenUsage;
   }>;
-  compare(input: {
-    approvedText: string;
-    criteria: { id: string; kind: string; label: string; prompt: string }[];
-  }): Promise<{
+  compare(input: { approvedText: string; criteria: Criterion[] }): Promise<{
     model: string;
     excerpts: { criterionId: string; excerpt: string }[];
-    usage: { inputTokens: number; outputTokens: number };
+    usage: TokenUsage;
   }>;
 }

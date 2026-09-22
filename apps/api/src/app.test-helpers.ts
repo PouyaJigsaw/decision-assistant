@@ -5,22 +5,24 @@ import { openDatabase } from "./db/client";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
 
-export function createTestApp() {
+export function createTestApp(options: { jev?: JevClient; llm?: LlmClient; env?: Partial<Env> } = {}) {
   const env: Env = {
     accountEmail: "recruiter@example.com",
     accountPassword: "sitting-password",
     evaluationsEnabled: true,
     port: 8787,
+    llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
+    ...options.env,
   };
   const db = openDatabase(":memory:");
   seedUser(db, env);
-  const jev: JevClient = {
+  const jev: JevClient = options.jev ?? {
     calls: 0,
     async evaluate() {
       throw new Error("not stubbed");
     },
   };
-  const llm: LlmClient = {
+  const llm: LlmClient = options.llm ?? {
     calls: 0,
     async draftRubric() {
       throw new Error("not stubbed");

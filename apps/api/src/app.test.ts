@@ -1,6 +1,8 @@
 import { sampleRubric } from "@decision-assistant/domain";
 import { describe, expect, it } from "vitest";
 import { createTestApp, signIn } from "./app.test-helpers";
+import { trialUses } from "./db/schema";
+import { FakeLlm } from "./providers/fake-llm";
 
 describe("GET /v1/health", () => {
   it("reports the database without calling a provider", async () => {
@@ -119,5 +121,63 @@ describe("roles and rubrics", () => {
     expect(await current.json()).toMatchObject({ version: 2, criteria: v2.criteria });
   });
 });
+
+describe("POST /v1/roles/:roleId/rubric-drafts", () => {
+  it("omits protected draft criteria and does not spend a trial use", async () => {
+    const llm = new FakeLlm({
+      draftRubric() {
+        return {
+          model: "fake-llm",
+          criteria: [
+            { kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" },
+            { kind: "preference", label: "Team", prompt: "Does the candidate mention cultural fit?" },
+            {
+              kind: "disqualifier",
+              label: "No ownership",
+              prompt: "Has the candidate never owned production systems?",
+            },
+            { kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
+          ],
+          usage: { inputTokens: 1842, outputTokens: 610 },
+        };
+      },
+    });
+    const { app, db } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    const role = await created.json();
+
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: "Need Go, ownership, and senior scope." }),
+    });
+    expect(draft.status).toBe(201);
+    expect(await draft.json()).toEqual({
+      criteria: [
+        { id: "c1", kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" },
+        {
+          id: "c2",
+          kind: "disqualifier",
+          label: "No ownership",
+          prompt: "Has the candidate never owned production systems?",
+        },
+        { id: "c3", kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
+      ],
+      omitted: ["cultural fit"],
+      usage: { inputTokens: 1842, outputTokens: 610 },
+      cost: { inputUsd: 0.005526, outputUsd: 0.00915, totalUsd: 0.014676 },
+    });
+
+    expect(db.select().from(trialUses).all()).toEqual([]);
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({ successCount: 0, usesRemaining: 3 });
+  });
+});
+
 
 

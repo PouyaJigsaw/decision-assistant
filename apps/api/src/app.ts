@@ -1,4 +1,12 @@
-import { criterionSchema, TRIAL_SUCCESS_CAP, usesRemaining, validateRubric } from "@decision-assistant/domain";
+import {
+  costFromUsage,
+  criterionSchema,
+  scanSafety,
+  TRIAL_SUCCESS_CAP,
+  usesRemaining,
+  validateRubric,
+  type Criterion,
+} from "@decision-assistant/domain";
 import { and, desc, eq } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
@@ -116,6 +124,41 @@ export function createApp(deps: {
       })
       .run();
     return c.json({ id, version, criteria: parsed.data }, 201);
+  });
+
+  app.post("/v1/roles/:roleId/rubric-drafts", requireUser, async (c) => {
+    const role = ownedRole(db, c.req.param("roleId"), c.get("user").id);
+    if (!role) return c.json({ error: "role_not_found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const notes = body && typeof body.notes === "string" ? body.notes : "";
+    const drafted = await deps.llm.draftRubric(notes);
+    const omitted: string[] = [];
+    const criteria: Criterion[] = [];
+    for (const item of drafted.criteria) {
+      const scan = scanSafety(`${item.label}\n${item.prompt}`);
+      if (!scan.ok) {
+        omitted.push(scan.term);
+        continue;
+      }
+      criteria.push({
+        id: `c${criteria.length + 1}`,
+        kind: item.kind,
+        label: item.label,
+        prompt: item.prompt,
+      });
+    }
+    if (criteria.length === 0) {
+      return c.json({ error: "invalid_rubric", reason: "empty_requirement" }, 422);
+    }
+    return c.json(
+      {
+        criteria,
+        omitted,
+        usage: drafted.usage,
+        cost: costFromUsage(drafted.usage, deps.env.llmPrice),
+      },
+      201,
+    );
   });
 
   app.get("/v1/roles/:roleId/rubrics/current", requireUser, (c) => {
