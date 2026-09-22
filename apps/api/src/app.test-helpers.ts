@@ -1,11 +1,13 @@
 import type { Hono } from "hono";
 import { createApp } from "./app";
 import { seedUser } from "./auth";
-import { openDatabase } from "./db/client";
+import { openDatabase, type AppDatabase } from "./db/client";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
 
-export function createTestApp(options: { jev?: JevClient; llm?: LlmClient; env?: Partial<Env> } = {}) {
+export function createTestApp(
+  options: { jev?: JevClient; llm?: LlmClient; env?: Partial<Env>; db?: AppDatabase } = {},
+) {
   const env: Env = {
     accountEmail: "recruiter@example.com",
     accountPassword: "sitting-password",
@@ -14,7 +16,7 @@ export function createTestApp(options: { jev?: JevClient; llm?: LlmClient; env?:
     llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
     ...options.env,
   };
-  const db = openDatabase(":memory:");
+  const db = options.db ?? openDatabase(":memory:");
   seedUser(db, env);
   const jev: JevClient = options.jev ?? {
     calls: 0,

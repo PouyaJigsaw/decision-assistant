@@ -1,5 +1,7 @@
 import { sampleRubric } from "@decision-assistant/domain";
+import type { Hono } from "hono";
 import { describe, expect, it } from "vitest";
+import { getEvaluation } from "./app";
 import { createTestApp, signIn } from "./app.test-helpers";
 import { evaluations, trialUses } from "./db/schema";
 import { FakeJev } from "./providers/fake-jev";
@@ -53,6 +55,33 @@ function contactProviders() {
         };
       },
     }),
+  };
+}
+
+async function approveRubric(app: Hono, headers: Record<string, string>) {
+  const created = await app.request("/v1/roles", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title: "Senior backend engineer" }),
+  });
+  const role = await created.json();
+  const approved = await app.request(`/v1/roles/${role.id}/rubrics`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ criteria: sampleRubric }),
+  });
+  const rubric = await approved.json();
+  return { role, rubric };
+}
+
+function evaluateBody(roleId: string, rubricVersionId: string, overrides: Record<string, unknown> = {}) {
+  return {
+    roleId,
+    rubricVersionId,
+    approvedText: APPROVED_TEXT,
+    keepExtracts: true,
+    comparisonEnabled: true,
+    ...overrides,
   };
 }
 
@@ -237,29 +266,11 @@ describe("POST /v1/evaluations", () => {
     const { app, db } = createTestApp({ jev, llm });
     const { headers } = await signIn(app);
 
-    const created = await app.request("/v1/roles", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ title: "Senior backend engineer" }),
-    });
-    const role = await created.json();
-    const approved = await app.request(`/v1/roles/${role.id}/rubrics`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ criteria: sampleRubric }),
-    });
-    const rubric = await approved.json();
-
+    const { role, rubric } = await approveRubric(app, headers);
     const evaluated = await app.request("/v1/evaluations", {
       method: "POST",
       headers: { ...headers, "Idempotency-Key": "11111111-1111-4111-8111-111111111111" },
-      body: JSON.stringify({
-        roleId: role.id,
-        rubricVersionId: rubric.id,
-        approvedText: APPROVED_TEXT,
-        keepExtracts: true,
-        comparisonEnabled: true,
-      }),
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
     });
     expect(evaluated.status).toBe(200);
     const body = await evaluated.json();
@@ -288,6 +299,109 @@ describe("POST /v1/evaluations", () => {
     expect(jev.calls).toBe(1);
     expect(llm.calls).toBe(1);
     expect(db.select().from(evaluations).get()?.approvedText).toBe(APPROVED_TEXT);
+  });
+
+  it("replays the same key and body without calling Jev again", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const key = "22222222-2222-4222-8222-222222222222";
+    const payload = evaluateBody(role.id, rubric.id);
+
+    const first = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(payload),
+    });
+    expect(first.status).toBe(200);
+    const original = await first.json();
+
+    const replay = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(payload),
+    });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({
+      id: original.id,
+      replayed: true,
+      usesRemaining: 2,
+    });
+    expect(jev.calls).toBe(1);
+  });
+
+  it("rejects the same key with a different approved text", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const key = "33333333-3333-4333-8333-333333333333";
+
+    const first = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(first.status).toBe(200);
+    expect(jev.calls).toBe(1);
+
+    const conflict = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id, { approvedText: "Different profile text." })),
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: "idempotency_conflict" });
+    expect(jev.calls).toBe(1);
+  });
+
+  it("keeps the action when keepExtracts is false and stores no approved text", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "44444444-4444-4444-8444-444444444444" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id, { keepExtracts: false })),
+    });
+    expect(evaluated.status).toBe(200);
+    const body = await evaluated.json();
+    expect(body.action).toBe("contact");
+    const row = getEvaluation(db, body.id);
+    expect(row?.approvedText).toBeNull();
+    expect(row?.action).toBe("contact");
+  });
+
+  it("returns the stored LLM price after the env price changes", async () => {
+    const { jev, llm } = contactProviders();
+    const first = createTestApp({ jev, llm });
+    const { headers } = await signIn(first.app);
+    const { role, rubric } = await approveRubric(first.app, headers);
+    const evaluated = await first.app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "55555555-5555-4555-8555-555555555555" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const created = await evaluated.json();
+
+    const reread = createTestApp({
+      db: first.db,
+      env: { llmPrice: { inputUsdPerMillion: 1, outputUsdPerMillion: 1 } },
+    });
+    const { headers: nextHeaders } = await signIn(reread.app);
+    const got = await reread.app.request(`/v1/evaluations/${created.id}`, { headers: nextHeaders });
+    expect(got.status).toBe(200);
+    expect(await got.json()).toMatchObject({
+      id: created.id,
+      replayed: false,
+      llm: {
+        price: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
+        cost: { inputUsd: 0.001236, outputUsd: 0.00132, totalUsd: 0.002556 },
+      },
+    });
   });
 });
 

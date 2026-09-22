@@ -171,7 +171,9 @@ export function createApp(deps: {
 
   app.post("/v1/evaluations", requireUser, async (c) => {
     const idempotencyKey = c.req.header("Idempotency-Key") ?? c.req.header("idempotency-key");
-    if (!idempotencyKey) return c.json({ error: "idempotency_key_required" }, 400);
+    if (!idempotencyKey || !UUID_RE.test(idempotencyKey)) {
+      return c.json({ error: "idempotency_key_required" }, 400);
+    }
     const body = await c.req.json().catch(() => null);
     const parsedBody = evaluateBody.safeParse(body);
     if (!parsedBody.success) return c.json({ error: "invalid_body" }, 400);
@@ -180,7 +182,28 @@ export function createApp(deps: {
     const rubric = ownedRubric(db, rubricVersionId, user.id);
     if (!rubric || rubric.roleId !== roleId) return c.json({ error: "rubric_not_found" }, 404);
     const criteria = JSON.parse(rubric.criteriaJson) as Criterion[];
+    const hash = hashEvaluateBody({
+      roleId,
+      rubricVersionId,
+      approvedText,
+      keepExtracts,
+      comparisonEnabled,
+    });
+    const existing = db
+      .select()
+      .from(evaluations)
+      .where(and(eq(evaluations.userId, user.id), eq(evaluations.idempotencyKey, idempotencyKey)))
+      .get();
     const successCount = db.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
+    if (existing) {
+      if (existing.bodyHash !== hash) return c.json({ error: "idempotency_conflict" }, 409);
+      if (existing.status === "success" || existing.status === "refused_cap") {
+        return c.json(toEvaluationResponse(existing, usesRemaining(successCount), true));
+      }
+      if (existing.status === "in_progress" && Date.now() - existing.updatedAt < 15_000) {
+        return c.json({ error: "evaluation_in_progress" }, 409);
+      }
+    }
     const gate = preflight({ evaluationsEnabled: deps.env.evaluationsEnabled, successCount });
     if (!gate.proceed) {
       if (gate.reason === "kill_switch") return c.json({ error: "evaluations_disabled" }, 503);
@@ -189,11 +212,48 @@ export function createApp(deps: {
         409,
       );
     }
+    const now = Date.now();
+    const id = existing?.id ?? crypto.randomUUID();
+    if (!existing) {
+      db.insert(evaluations)
+        .values({
+          id,
+          userId: user.id,
+          roleId,
+          rubricVersionId,
+          idempotencyKey,
+          bodyHash: hash,
+          status: "in_progress",
+          countsAsUse: 0,
+          keepExtracts: keepExtracts ? 1 : 0,
+          comparisonEnabled: comparisonEnabled ? 1 : 0,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+    } else {
+      db.update(evaluations)
+        .set({ status: "in_progress", updatedAt: now })
+        .where(eq(evaluations.id, id))
+        .run();
+    }
     const jevRequest = toJevRequest(criteria, approvedText);
     const jevResult = await deps.jev.evaluate({ state: jevRequest.state, questions: jevRequest.questions });
-    if (!jevResult.ok) return c.json({ error: "jev_failed", reason: jevResult.reason }, 502);
+    if (!jevResult.ok) {
+      db.update(evaluations)
+        .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
+        .where(eq(evaluations.id, id))
+        .run();
+      return c.json({ error: "jev_failed", reason: jevResult.reason, id, usesRemaining: usesRemaining(successCount) }, 502);
+    }
     const parsed = parseJevResponse(criteria, jevResult.payload);
-    if (!parsed.ok) return c.json({ error: "jev_failed", reason: "invalid_jev" }, 502);
+    if (!parsed.ok) {
+      db.update(evaluations)
+        .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
+        .where(eq(evaluations.id, id))
+        .run();
+      return c.json({ error: "jev_failed", reason: "invalid_jev", id, usesRemaining: usesRemaining(successCount) }, 502);
+    }
     const rec = recommend(criteria, parsed.answers);
     let llm:
       | {
@@ -225,22 +285,9 @@ export function createApp(deps: {
     });
     const jevCost = costFromUsage(parsed.usage, JEV_PRICE);
     const used = countsAsUse({ jevValid: true, idempotencyReplay: false });
-    const id = crypto.randomUUID();
-    const now = Date.now();
-    db.insert(evaluations)
-      .values({
-        id,
-        userId: user.id,
-        roleId,
-        rubricVersionId,
-        idempotencyKey,
-        bodyHash: hashEvaluateBody({
-          roleId,
-          rubricVersionId,
-          approvedText,
-          keepExtracts,
-          comparisonEnabled,
-        }),
+    const finishedAt = Date.now();
+    db.update(evaluations)
+      .set({
         status: "success",
         countsAsUse: used ? 1 : 0,
         action: rec.action,
@@ -262,29 +309,28 @@ export function createApp(deps: {
         approvedText: keepExtracts ? approvedText : null,
         keepExtracts: keepExtracts ? 1 : 0,
         comparisonEnabled: comparisonEnabled ? 1 : 0,
-        notes: null,
-        createdAt: now,
-        updatedAt: now,
+        updatedAt: finishedAt,
       })
+      .where(eq(evaluations.id, id))
       .run();
     if (used) {
       db.insert(trialUses)
-        .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: now })
+        .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: finishedAt })
         .run();
     }
-    return c.json({
-      id,
-      status: "success",
-      action: rec.action,
-      score: rec.score,
-      reasonCode: rec.reasonCode,
-      answers,
-      jev: { model: parsed.model, usage: parsed.usage, cost: jevCost },
-      llm,
-      usesRemaining: usesRemaining(successCount + (used ? 1 : 0)),
-      countsAsUse: used,
-      replayed: false,
-    });
+    const stored = getEvaluation(db, id);
+    return c.json(toEvaluationResponse(stored!, usesRemaining(successCount + (used ? 1 : 0)), false));
+  });
+
+  app.get("/v1/evaluations/:id", requireUser, (c) => {
+    const row = db
+      .select()
+      .from(evaluations)
+      .where(and(eq(evaluations.id, c.req.param("id")), eq(evaluations.userId, c.get("user").id)))
+      .get();
+    if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, c.get("user").id)).all().length;
+    return c.json(toEvaluationResponse(row, usesRemaining(successCount), false));
   });
 
   app.get("/v1/roles/:roleId/rubrics/current", requireUser, (c) => {
@@ -330,6 +376,61 @@ const evaluateBody = z.object({
   keepExtracts: z.boolean(),
   comparisonEnabled: z.boolean().default(true),
 });
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function getEvaluation(db: BetterSQLite3Database, id: string) {
+  return (db as AppDatabase).select().from(evaluations).where(eq(evaluations.id, id)).get();
+}
+
+function toEvaluationResponse(
+  row: NonNullable<ReturnType<typeof getEvaluation>>,
+  remaining: number,
+  replayed: boolean,
+) {
+  const answers = row.answersJson ? JSON.parse(row.answersJson) : [];
+  const jev =
+    row.jevModel == null
+      ? null
+      : {
+          model: row.jevModel,
+          usage: { inputTokens: row.jevInputTokens, outputTokens: row.jevOutputTokens },
+          cost: {
+            inputUsd: row.jevInputUsd,
+            outputUsd: row.jevOutputUsd,
+            totalUsd: (row.jevInputUsd ?? 0) + (row.jevOutputUsd ?? 0),
+          },
+        };
+  const llm =
+    row.llmModel == null
+      ? null
+      : {
+          model: row.llmModel,
+          usage: { inputTokens: row.llmInputTokens, outputTokens: row.llmOutputTokens },
+          cost: {
+            inputUsd: row.llmInputUsd,
+            outputUsd: row.llmOutputUsd,
+            totalUsd: (row.llmInputUsd ?? 0) + (row.llmOutputUsd ?? 0),
+          },
+          price: {
+            inputUsdPerMillion: row.llmInputUsdPerMillion,
+            outputUsdPerMillion: row.llmOutputUsdPerMillion,
+          },
+        };
+  return {
+    id: row.id,
+    status: row.status,
+    action: row.action,
+    score: row.score,
+    reasonCode: row.reasonCode,
+    answers,
+    jev,
+    llm,
+    usesRemaining: remaining,
+    countsAsUse: replayed ? false : Boolean(row.countsAsUse),
+    replayed,
+  };
+}
 
 function hashEvaluateBody(body: {
   roleId: string;
