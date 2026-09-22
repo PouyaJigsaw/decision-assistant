@@ -34,6 +34,7 @@ export function ResultScreen({
   evaluation,
   roleTitle = "Result",
   api,
+  onOpenHistory,
 }: {
   evaluation: ResultEvaluation;
   roleTitle?: string;
@@ -41,6 +42,7 @@ export function ResultScreen({
     correct: (id: string, action: Action) => Promise<unknown>;
     saveNote: (id: string, notes: string) => Promise<unknown>;
   };
+  onOpenHistory?: () => void;
 }) {
   const [checked, setChecked] = useState<Action>(evaluation.action);
   const [note, setNote] = useState("");
@@ -122,6 +124,11 @@ export function ResultScreen({
           void api.saveNote(evaluation.id, note);
         }}
       />
+      {onOpenHistory ? (
+        <button className="linkish" type="button" onClick={onOpenHistory}>
+          History
+        </button>
+      ) : null}
     </section>
   );
 }

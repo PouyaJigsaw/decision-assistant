@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { JEV_PRICE, costFromUsage } from "@decision-assistant/domain";
 import { ErrorScreen } from "./ErrorScreen";
 import { EvaluatingScreen } from "./EvaluatingScreen";
+import { HistoryScreen } from "./HistoryScreen";
 import { PreviewScreen } from "./PreviewScreen";
 import { ResultScreen } from "./ResultScreen";
 import { RoleScreen } from "./RoleScreen";
@@ -223,5 +224,94 @@ describe("EvaluatingScreen", () => {
       ),
     ).toBeTruthy();
     expect(screen.getByText("A failed Jev call shows an error and no recommendation.")).toBeTruthy();
+  });
+});
+
+const historyRows = {
+  evaluations: [
+    {
+      id: "e1",
+      action: "investigate",
+      roleTitle: "Senior backend",
+      jevTotalUsd: 0.00009156,
+      llmTotalUsd: 0.014,
+      comparisonEnabled: true,
+    },
+    {
+      id: "e2",
+      action: "contact",
+      roleTitle: "Staff",
+      jevTotalUsd: 0.00009156,
+      llmTotalUsd: 0,
+      comparisonEnabled: false,
+    },
+  ],
+  totals: { jevUsd: 0.0004, llmUsd: 0.041 },
+};
+
+describe("HistoryScreen", () => {
+  it("shows stored totals, LLM off, and does not increment remaining on delete", async () => {
+    const user = userEvent.setup();
+    const list = vi.fn(async () => historyRows);
+    const deleteAll = vi.fn(async () => {
+      list.mockResolvedValueOnce({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
+    });
+
+    render(<HistoryScreen usesRemaining={0} api={{ list, deleteAll }} />);
+
+    expect(await screen.findByText("Running total")).toBeTruthy();
+    expect(screen.getByText("Jev $0.0004")).toBeTruthy();
+    expect(screen.getByText("LLM $0.041")).toBeTruthy();
+    expect(screen.getByText("Totals use the price stored with each run.")).toBeTruthy();
+    expect(screen.getByText("Investigate")).toBeTruthy();
+    expect(screen.getByText("Senior backend")).toBeTruthy();
+    expect(screen.getByText("Jev $0.00009 · LLM $0.014")).toBeTruthy();
+    expect(screen.getByText("Jev $0.00009 · LLM off")).toBeTruthy();
+    expect(screen.getByText("Uses remaining: 0 of 3")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Delete all history" }));
+
+    expect(deleteAll).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Senior backend")).toBeNull();
+    expect(screen.getByText("Uses remaining: 0 of 3")).toBeTruthy();
+  });
+});
+
+describe("keyboard path", () => {
+  it("keeps preview extract controls in tab order", () => {
+    render(
+      <PreviewScreen
+        url="https://example.com"
+        roleTitle="Role"
+        sections={previewSections}
+        api={{ evaluate: async () => undefined }}
+        onEvaluated={() => undefined}
+      />,
+    );
+
+    for (const name of ["Remove Headline", "Remove About", "Remove Experience", "Also run direct LLM", "Keep extracts on the server", "Evaluate"]) {
+      const role = name.startsWith("Also") || name.startsWith("Keep") ? "checkbox" : "button";
+      expect(screen.getByRole(role, { name }).tabIndex).not.toBe(-1);
+    }
+  });
+
+  it("exposes result actions as a radiogroup", () => {
+    render(
+      <ResultScreen
+        evaluation={{
+          id: "e1",
+          action: "investigate",
+          score: 62,
+          reasonCode: "missing_evidence",
+          answers: [],
+          jev: { usage: { inputTokens: 2180, outputTokens: 36 }, cost: jevCost },
+          llm: { usage: { inputTokens: 412, outputTokens: 88 }, cost: { totalUsd: 0.014 } },
+          usesRemaining: 2,
+        }}
+        api={{ correct: async () => undefined, saveNote: async () => undefined }}
+      />,
+    );
+
+    expect(screen.getByRole("radiogroup")).toBeTruthy();
   });
 });

@@ -32,9 +32,25 @@ export const runtimeJevPayload = {
   usage: { input_tokens: 2180, output_tokens: 36 },
 };
 
+function answersFor(questions: Record<string, { type?: string }>) {
+  const answers: Record<string, (typeof runtimeJevPayload.answers)[keyof typeof runtimeJevPayload.answers]> = {};
+  for (const [id, question] of Object.entries(questions)) {
+    const known = runtimeJevPayload.answers[id as keyof typeof runtimeJevPayload.answers];
+    answers[id] = known ?? (question.type === "score" ? runtimeJevPayload.answers.seniority : runtimeJevPayload.answers.go);
+  }
+  return answers;
+}
+
 export function createRuntimeProviders() {
   return {
-    jev: new FakeJev(() => ({ ok: true, model: "jev-1.13.0", payload: runtimeJevPayload })),
+    jev: new FakeJev((input) => ({
+      ok: true,
+      model: "jev-1.13.0",
+      payload: {
+        ...runtimeJevPayload,
+        answers: answersFor(input.questions as Record<string, { type?: string }>),
+      },
+    })),
     llm: new FakeLlm({
       draftRubric() {
         return {
@@ -52,13 +68,13 @@ export function createRuntimeProviders() {
           usage: { inputTokens: 1842, outputTokens: 610 },
         };
       },
-      compare() {
+      compare(input) {
         return {
           model: "fake-llm",
-          excerpts: [
-            { criterionId: "go", excerpt: "Led the payments API in Go for four years." },
-            { criterionId: "distributed", excerpt: "not in the profile" },
-          ],
+          excerpts: input.criteria.map((criterion, index) => ({
+            criterionId: criterion.id,
+            excerpt: index === 0 ? "Led the payments API in Go for four years." : "not in the profile",
+          })),
           usage: { inputTokens: 412, outputTokens: 88 },
         };
       },

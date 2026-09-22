@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { API_BASE_URL, ApiError, chromeTokenStore, createApi } from "../../src/api";
 import { ErrorScreen, type PanelError } from "./ErrorScreen";
 import { EvaluatingScreen } from "./EvaluatingScreen";
+import { HistoryScreen } from "./HistoryScreen";
 import { PreviewScreen, type ExtractSection } from "./PreviewScreen";
 import { ResultScreen, type ResultEvaluation } from "./ResultScreen";
 import { RoleScreen, type DraftResult } from "./RoleScreen";
@@ -11,7 +12,7 @@ import { SignInScreen } from "./SignInScreen";
 const tokenStore = chromeTokenStore();
 const api = createApi(API_BASE_URL, tokenStore);
 
-type Screen = "boot" | "signin" | "role" | "rubric" | "preview" | "evaluating" | "result" | "error";
+type Screen = "boot" | "signin" | "role" | "rubric" | "preview" | "evaluating" | "result" | "error" | "history";
 type EvaluateBody = { approvedText: string; comparisonEnabled: boolean; keepExtracts: boolean };
 
 function titleFromNotes(notes: string) {
@@ -219,6 +220,22 @@ export function App() {
         api={{
           correct: (id, action) => api.correct(id, action),
           saveNote: (id, notes) => api.saveNote(id, notes),
+        }}
+        onOpenHistory={() => setScreen("history")}
+      />
+    );
+  }
+  if (screen === "history") {
+    return (
+      <HistoryScreen
+        usesRemaining={usesRemaining ?? 0}
+        api={{
+          list: () => api.listEvaluations(),
+          deleteAll: async () => {
+            await api.deleteEvaluations();
+            const me = await api.me();
+            setUsesRemaining(me.usesRemaining);
+          },
         }}
       />
     );
