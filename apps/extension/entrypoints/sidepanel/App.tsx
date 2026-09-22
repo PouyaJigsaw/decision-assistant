@@ -1,6 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
-import { API_BASE_URL, chromeTokenStore, createApi } from "../../src/api";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { API_BASE_URL, ApiError, chromeTokenStore, createApi } from "../../src/api";
+import { ErrorScreen, type PanelError } from "./ErrorScreen";
+import { EvaluatingScreen } from "./EvaluatingScreen";
 import { PreviewScreen, type ExtractSection } from "./PreviewScreen";
+import { ResultScreen, type ResultEvaluation } from "./ResultScreen";
 import { RoleScreen, type DraftResult } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
 import { SignInScreen } from "./SignInScreen";
@@ -8,18 +11,38 @@ import { SignInScreen } from "./SignInScreen";
 const tokenStore = chromeTokenStore();
 const api = createApi(API_BASE_URL, tokenStore);
 
+type Screen = "boot" | "signin" | "role" | "rubric" | "preview" | "evaluating" | "result" | "error";
+type EvaluateBody = { approvedText: string; comparisonEnabled: boolean; keepExtracts: boolean };
+
 function titleFromNotes(notes: string) {
   const line = notes.split(/[\n.]/)[0]?.trim() ?? "";
   return line.slice(0, 80) || "Role";
 }
 
+function withLabels(evaluation: ResultEvaluation, criteria: DraftResult["criteria"]): ResultEvaluation {
+  const labels = new Map(criteria.map((item) => [item.id, item.label]));
+  return {
+    ...evaluation,
+    answers: evaluation.answers.map((answer) => ({
+      ...answer,
+      label: answer.label ?? labels.get(answer.criterionId),
+    })),
+  };
+}
+
 export function App() {
-  const [screen, setScreen] = useState<"boot" | "signin" | "role" | "rubric" | "preview">("boot");
-  const [error, setError] = useState<string | undefined>();
+  const [screen, setScreen] = useState<Screen>("boot");
+  const [signInError, setSignInError] = useState<string | undefined>();
   const [role, setRole] = useState<{ id: string; title: string } | null>(null);
   const [draft, setDraft] = useState<DraftResult | null>(null);
+  const [criteria, setCriteria] = useState<DraftResult["criteria"]>([]);
   const [rubricId, setRubricId] = useState<string | null>(null);
   const [extract, setExtract] = useState<{ url: string; sections: ExtractSection[] } | null>(null);
+  const [evaluation, setEvaluation] = useState<ResultEvaluation | null>(null);
+  const [panelError, setPanelError] = useState<PanelError | null>(null);
+  const [usesRemaining, setUsesRemaining] = useState<number | undefined>();
+  const [evalKey, setEvalKey] = useState<string | null>(null);
+  const [evalBody, setEvalBody] = useState<EvaluateBody | null>(null);
 
   useEffect(() => {
     void (async () => {
@@ -29,13 +52,43 @@ export function App() {
         return;
       }
       try {
-        await api.me();
+        const me = await api.me();
+        setUsesRemaining(me.usesRemaining);
         setScreen("role");
       } catch {
         setScreen("signin");
       }
     })();
   }, []);
+
+  const runEvaluate = useCallback(
+    async (body: EvaluateBody, key: string) => {
+      if (!role || !rubricId) throw new Error("missing rubric");
+      setScreen("evaluating");
+      try {
+        const result = (await api.evaluate({
+          roleId: role.id,
+          rubricVersionId: rubricId,
+          idempotencyKey: key,
+          ...body,
+        })) as ResultEvaluation;
+        setEvaluation(withLabels(result, criteria));
+        setUsesRemaining(result.usesRemaining);
+        setEvalKey(null);
+        setScreen("result");
+      } catch (error) {
+        if (error instanceof ApiError) {
+          const bodyJson = error.body && typeof error.body === "object" ? (error.body as { usesRemaining?: number }) : {};
+          setPanelError({ status: error.status, body: error.body });
+          if (typeof bodyJson.usesRemaining === "number") setUsesRemaining(bodyJson.usesRemaining);
+          setScreen("error");
+          return;
+        }
+        throw error;
+      }
+    },
+    [role, rubricId, criteria],
+  );
 
   const roleApi = useMemo(
     () => ({
@@ -50,9 +103,10 @@ export function App() {
 
   const rubricApi = useMemo(
     () => ({
-      async approveRubric(criteria: DraftResult["criteria"]) {
+      async approveRubric(next: DraftResult["criteria"]) {
         if (!role) throw new Error("missing role");
-        const approved = await api.approveRubric(role.id, criteria);
+        const approved = await api.approveRubric(role.id, next);
+        setCriteria(next);
         setRubricId(approved.id);
         return approved;
       },
@@ -62,16 +116,14 @@ export function App() {
 
   const previewApi = useMemo(
     () => ({
-      async evaluate(body: { approvedText: string; comparisonEnabled: boolean; keepExtracts: boolean }) {
-        if (!role || !rubricId) throw new Error("missing rubric");
-        return api.evaluate({
-          roleId: role.id,
-          rubricVersionId: rubricId,
-          ...body,
-        });
+      async evaluate(body: EvaluateBody) {
+        const key = evalKey ?? crypto.randomUUID();
+        setEvalKey(key);
+        setEvalBody(body);
+        await runEvaluate(body, key);
       },
     }),
-    [role, rubricId],
+    [evalKey, runEvaluate],
   );
 
   async function loadExtract() {
@@ -84,14 +136,14 @@ export function App() {
   if (screen === "signin") {
     return (
       <SignInScreen
-        error={error}
+        error={signInError}
         onSubmit={async (email, password) => {
           try {
             await api.login(email, password);
-            setError(undefined);
+            setSignInError(undefined);
             setScreen("role");
           } catch {
-            setError("Sign in failed");
+            setSignInError("Sign in failed");
           }
         }}
       />
@@ -124,40 +176,52 @@ export function App() {
     );
   }
   if (screen === "preview") {
-    return <PreviewOrMissing extract={extract} roleTitle={role?.title ?? ""} api={previewApi} />;
-  }
-  return null;
-}
-
-function PreviewOrMissing({
-  extract,
-  roleTitle,
-  api,
-}: {
-  extract: { url: string; sections: ExtractSection[] } | null;
-  roleTitle: string;
-  api: {
-    evaluate: (body: {
-      approvedText: string;
-      comparisonEnabled: boolean;
-      keepExtracts: boolean;
-    }) => Promise<unknown>;
-  };
-}) {
-  if (!extract) {
+    if (!extract) {
+      return (
+        <section className="panel">
+          <p className="lede">Open the toolbar on a profile tab to capture the extract.</p>
+        </section>
+      );
+    }
     return (
-      <section className="panel">
-        <p className="lede">Open the toolbar on a profile tab to capture the extract.</p>
-      </section>
+      <PreviewScreen
+        url={extract.url}
+        roleTitle={role?.title ?? ""}
+        sections={extract.sections}
+        api={previewApi}
+        onEvaluated={() => undefined}
+      />
     );
   }
-  return (
-    <PreviewScreen
-      url={extract.url}
-      roleTitle={roleTitle}
-      sections={extract.sections}
-      api={api}
-      onEvaluated={() => undefined}
-    />
-  );
+  if (screen === "evaluating") {
+    return <EvaluatingScreen roleTitle={role?.title} />;
+  }
+  if (screen === "error" && panelError) {
+    return (
+      <ErrorScreen
+        error={panelError}
+        usesRemaining={usesRemaining}
+        onRetry={
+          evalBody && evalKey
+            ? () => {
+                void runEvaluate(evalBody, evalKey);
+              }
+            : undefined
+        }
+      />
+    );
+  }
+  if (screen === "result" && evaluation) {
+    return (
+      <ResultScreen
+        evaluation={evaluation}
+        roleTitle={role?.title}
+        api={{
+          correct: (id, action) => api.correct(id, action),
+          saveNote: (id, notes) => api.saveNote(id, notes),
+        }}
+      />
+    );
+  }
+  return null;
 }

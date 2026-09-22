@@ -177,3 +177,40 @@ textarea {
   width: auto;
   margin-top: 3px;
 }
+
+.score {
+  margin: 8px 0 0;
+  font-size: 40px;
+  font-weight: 600;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.action {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--ink);
+  font: inherit;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+
+.action.checked {
+  background: var(--teal);
+  border-color: var(--teal);
+  color: #fff;
+}
+
+.chip {
+  align-self: flex-start;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--pill-preferred);
+  padding: 3px 8px;
+  font-size: 12px;
+}

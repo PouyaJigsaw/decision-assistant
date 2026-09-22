@@ -94,6 +94,24 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
         }),
       });
     },
+    async correct(id: string, action: string) {
+      return request(`/v1/evaluations/${id}/corrections`, {
+        method: "POST",
+        body: JSON.stringify({ action }),
+      });
+    },
+    async saveNote(id: string, notes: string) {
+      return request(`/v1/evaluations/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ notes }),
+      });
+    },
+    async listEvaluations() {
+      return request("/v1/evaluations");
+    },
+    async deleteEvaluations() {
+      return request("/v1/evaluations", { method: "DELETE" });
+    },
   };
 }
 

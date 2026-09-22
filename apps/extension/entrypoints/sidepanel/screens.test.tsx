@@ -2,7 +2,11 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JEV_PRICE, costFromUsage } from "@decision-assistant/domain";
+import { ErrorScreen } from "./ErrorScreen";
+import { EvaluatingScreen } from "./EvaluatingScreen";
 import { PreviewScreen } from "./PreviewScreen";
+import { ResultScreen } from "./ResultScreen";
 import { RoleScreen } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
 
@@ -124,5 +128,100 @@ describe("PreviewScreen", () => {
     expect(payload.approvedText).not.toContain("Builds Go services");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/evaluations");
+  });
+});
+
+const jevCost = costFromUsage({ inputTokens: 2180, outputTokens: 36 }, JEV_PRICE);
+
+describe("ResultScreen", () => {
+  it("shows the investigate recommendation, both meters, and uses remaining", () => {
+    render(
+      <ResultScreen
+        evaluation={{
+          id: "e1",
+          action: "investigate",
+          score: 62,
+          reasonCode: "missing_evidence",
+          answers: [
+            {
+              criterionId: "go",
+              label: "Go",
+              result: "no_evidence",
+              confidence: 0.44,
+              excerpt: null,
+              llmExcerpt: null,
+            },
+          ],
+          jev: {
+            usage: { inputTokens: 2180, outputTokens: 36 },
+            cost: jevCost,
+          },
+          llm: {
+            usage: { inputTokens: 412, outputTokens: 88 },
+            cost: { totalUsd: 0.014 },
+          },
+          usesRemaining: 2,
+        }}
+        api={{ correct: async () => undefined, saveNote: async () => undefined }}
+      />,
+    );
+
+    expect(
+      screen.getByText("A required qualification cannot be confirmed. Missing evidence is not treated as a mismatch."),
+    ).toBeTruthy();
+    expect(screen.getByText("62")).toBeTruthy();
+    expect(screen.getByText("No evidence · 0.44")).toBeTruthy();
+    expect(screen.getByText("Jev does not return text.")).toBeTruthy();
+    expect(screen.getByText("No evidence found.")).toBeTruthy();
+    expect(
+      screen.getByText("Jev output tokens are reported and not billed. They are not generated text."),
+    ).toBeTruthy();
+    expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
+  });
+});
+
+describe("ErrorScreen", () => {
+  it("renders a Jev failure without a recommendation", () => {
+    render(
+      <ErrorScreen
+        error={{ status: 502, body: { error: "jev_failed", reason: "invalid_jev", usesRemaining: 2 } }}
+        usesRemaining={2}
+      />,
+    );
+
+    expect(screen.getByText("Evaluation failed")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Investigate" })).toBeNull();
+  });
+
+  it("renders the trial-cap sentence from a 409 body", () => {
+    render(
+      <ErrorScreen
+        error={{
+          status: 409,
+          body: { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
+        }}
+        usesRemaining={0}
+      />,
+    );
+
+    expect(screen.getByText("This trial covered three profiles. Evaluate is closed.")).toBeTruthy();
+  });
+});
+
+describe("EvaluatingScreen", () => {
+  it("explains the one-pass Jev call and fail-closed path", () => {
+    render(<EvaluatingScreen />);
+
+    expect(
+      screen.getByText(
+        "Jev answers every criterion in one pass. The action is computed locally and is not shown until that call succeeds.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByText("A failed Jev call shows an error and no recommendation.")).toBeTruthy();
   });
 });
