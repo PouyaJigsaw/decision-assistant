@@ -6,7 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "start": "node --experimental-strip-types --no-warnings src/index.ts",
+    "start": "tsx src/index.ts",
     "live-evaluate": "tsx scripts/live-evaluate.ts"
   },
   "dependencies": {

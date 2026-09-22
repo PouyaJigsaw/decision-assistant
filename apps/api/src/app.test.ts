@@ -275,6 +275,30 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
     const me = await app.request("/v1/me", { headers });
     expect(await me.json()).toMatchObject({ successCount: 0, usesRemaining: 3 });
   });
+
+  it("returns 502 llm_failed when the live draft throws", async () => {
+    const llm = new FakeLlm({
+      draftRubric() {
+        throw new Error("llm_failed");
+      },
+    });
+    const { app } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    const role = await created.json();
+
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: "Need Go." }),
+    });
+    expect(draft.status).toBe(502);
+    expect(await draft.json()).toEqual({ error: "llm_failed" });
+  });
 });
 
 describe("POST /v1/evaluations", () => {

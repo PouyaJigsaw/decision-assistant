@@ -44,6 +44,13 @@ describe("readEnv", () => {
         LLM_OUTPUT_USD_PER_MILLION: "16",
       }).llmPrice,
     ).toEqual({ inputUsdPerMillion: 4, outputUsdPerMillion: 16 });
+    expect(
+      readEnv({
+        ...credentials,
+        ANTHROPIC_INPUT_USD_PER_MILLION: "",
+        LLM_INPUT_USD_PER_MILLION: "4",
+      }).llmPrice,
+    ).toEqual({ inputUsdPerMillion: 4, outputUsdPerMillion: 15 });
   });
 
   it("throws when resolved prices are not finite or are negative", () => {

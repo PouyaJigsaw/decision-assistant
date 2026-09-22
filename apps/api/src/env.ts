@@ -14,7 +14,8 @@ export type Env = {
 };
 
 function readPrice(raw: string | undefined, fallback: number): number {
-  const value = raw === undefined ? fallback : Number(raw);
+  const trimmed = raw?.trim();
+  const value = trimmed === undefined || trimmed === "" ? fallback : Number(trimmed);
   if (!Number.isFinite(value) || value < 0) {
     throw new Error("LLM prices must be finite and >= 0");
   }

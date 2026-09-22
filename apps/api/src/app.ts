@@ -138,7 +138,15 @@ export function createApp(deps: {
     if (!role) return c.json({ error: "role_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const notes = body && typeof body.notes === "string" ? body.notes : "";
-    const drafted = await deps.llm.draftRubric(notes);
+    let drafted;
+    try {
+      drafted = await deps.llm.draftRubric(notes);
+    } catch (err) {
+      if (err instanceof Error && err.message === "llm_failed") {
+        return c.json({ error: "llm_failed" }, 502);
+      }
+      throw err;
+    }
     const omitted: string[] = [];
     const criteria: Criterion[] = [];
     for (const item of drafted.criteria) {

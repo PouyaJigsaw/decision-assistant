@@ -17,8 +17,8 @@ seedUser(db, env);
 let jev: JevClient;
 let llm: LlmClient;
 if (env.providers === "live") {
-  if (!env.typesafeApiKey || !env.anthropicApiKey) {
-    throw new Error("TYPESAFE_API_KEY and ANTHROPIC_API_KEY are required when PROVIDERS is live");
+  if (!env.typesafeApiKey || !env.anthropicApiKey || !env.anthropicModel) {
+    throw new Error("TYPESAFE_API_KEY, ANTHROPIC_API_KEY, and ANTHROPIC_MODEL are required when PROVIDERS is live");
   }
   jev = createLiveJev({ apiKey: env.typesafeApiKey });
   llm = createLiveLlm({ apiKey: env.anthropicApiKey, model: env.anthropicModel });
