@@ -29,7 +29,7 @@ import {
   verifyPassword,
 } from "./auth";
 import type { AppDatabase } from "./db/client";
-import { evaluations, roles, rubricVersions, trialUses } from "./db/schema";
+import { corrections, evaluations, roles, rubricVersions, trialUses } from "./db/schema";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
 
@@ -207,6 +207,25 @@ export function createApp(deps: {
     const gate = preflight({ evaluationsEnabled: deps.env.evaluationsEnabled, successCount });
     if (!gate.proceed) {
       if (gate.reason === "kill_switch") return c.json({ error: "evaluations_disabled" }, 503);
+      const refusedAt = Date.now();
+      if (!existing) {
+        db.insert(evaluations)
+          .values({
+            id: crypto.randomUUID(),
+            userId: user.id,
+            roleId,
+            rubricVersionId,
+            idempotencyKey,
+            bodyHash: hash,
+            status: "refused_cap",
+            countsAsUse: 0,
+            keepExtracts: keepExtracts ? 1 : 0,
+            comparisonEnabled: comparisonEnabled ? 1 : 0,
+            createdAt: refusedAt,
+            updatedAt: refusedAt,
+          })
+          .run();
+      }
       return c.json(
         { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
         409,
@@ -323,14 +342,78 @@ export function createApp(deps: {
   });
 
   app.get("/v1/evaluations/:id", requireUser, (c) => {
-    const row = db
-      .select()
-      .from(evaluations)
-      .where(and(eq(evaluations.id, c.req.param("id")), eq(evaluations.userId, c.get("user").id)))
-      .get();
+    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
     const successCount = db.select().from(trialUses).where(eq(trialUses.userId, c.get("user").id)).all().length;
     return c.json(toEvaluationResponse(row, usesRemaining(successCount), false));
+  });
+
+  app.get("/v1/evaluations", requireUser, (c) => {
+    const rows = db.select().from(evaluations).where(eq(evaluations.userId, c.get("user").id)).all();
+    const items = rows.map((row) => {
+      const role = db.select().from(roles).where(eq(roles.id, row.roleId)).get();
+      const jevTotalUsd = (row.jevInputUsd ?? 0) + (row.jevOutputUsd ?? 0);
+      const llmTotalUsd = (row.llmInputUsd ?? 0) + (row.llmOutputUsd ?? 0);
+      return {
+        id: row.id,
+        action: row.action,
+        roleTitle: role?.title ?? "",
+        jevTotalUsd,
+        llmTotalUsd,
+        comparisonEnabled: Boolean(row.comparisonEnabled),
+      };
+    });
+    return c.json({
+      evaluations: items,
+      totals: {
+        jevUsd: items.reduce((sum, item) => sum + item.jevTotalUsd, 0),
+        llmUsd: items.reduce((sum, item) => sum + item.llmTotalUsd, 0),
+      },
+    });
+  });
+
+  app.post("/v1/evaluations/:id/corrections", requireUser, async (c) => {
+    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = actionBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid_action" }, 422);
+    db.insert(corrections)
+      .values({
+        id: crypto.randomUUID(),
+        evaluationId: row.id,
+        action: parsed.data.action,
+        createdAt: Date.now(),
+      })
+      .run();
+    return c.json({ action: parsed.data.action }, 201);
+  });
+
+  app.patch("/v1/evaluations/:id", requireUser, async (c) => {
+    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    const body = await c.req.json().catch(() => null);
+    const parsed = notesBody.safeParse(body);
+    if (!parsed.success) return c.json({ error: "invalid_notes" }, 422);
+    db.update(evaluations).set({ notes: parsed.data.notes, updatedAt: Date.now() }).where(eq(evaluations.id, row.id)).run();
+    return c.json({ notes: parsed.data.notes });
+  });
+
+  app.delete("/v1/evaluations/:id", requireUser, (c) => {
+    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
+    db.delete(evaluations).where(eq(evaluations.id, row.id)).run();
+    return c.body(null, 204);
+  });
+
+  app.delete("/v1/evaluations", requireUser, (c) => {
+    const rows = db.select().from(evaluations).where(eq(evaluations.userId, c.get("user").id)).all();
+    for (const row of rows) {
+      db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
+    }
+    db.delete(evaluations).where(eq(evaluations.userId, c.get("user").id)).run();
+    return c.body(null, 204);
   });
 
   app.get("/v1/roles/:roleId/rubrics/current", requireUser, (c) => {
@@ -361,6 +444,14 @@ function ownedRole(db: AppDatabase, roleId: string, userId: string) {
     .get();
 }
 
+function ownedEvaluation(db: AppDatabase, evaluationId: string, userId: string) {
+  return db
+    .select()
+    .from(evaluations)
+    .where(and(eq(evaluations.id, evaluationId), eq(evaluations.userId, userId)))
+    .get();
+}
+
 function ownedRubric(db: AppDatabase, rubricVersionId: string, userId: string) {
   const rubric = db.select().from(rubricVersions).where(eq(rubricVersions.id, rubricVersionId)).get();
   if (!rubric) return null;
@@ -368,6 +459,14 @@ function ownedRubric(db: AppDatabase, rubricVersionId: string, userId: string) {
   if (!role) return null;
   return rubric;
 }
+
+const actionBody = z.object({
+  action: z.enum(["contact", "investigate", "save_for_later", "skip"]),
+});
+
+const notesBody = z.object({
+  notes: z.string().max(2000),
+});
 
 const evaluateBody = z.object({
   roleId: z.string().min(1),

@@ -403,6 +403,163 @@ describe("POST /v1/evaluations", () => {
       },
     });
   });
+
+  it("retries a Jev timeout on the same key and then spends one use", async () => {
+    let attempts = 0;
+    const jev = new FakeJev(() => {
+      attempts += 1;
+      if (attempts === 1) return { ok: false, reason: "timeout" };
+      return { ok: true, model: "jev-1.13.0", payload: contactJevPayload };
+    });
+    const { llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const key = "66666666-6666-4666-8666-666666666666";
+    const payload = evaluateBody(role.id, rubric.id);
+
+    const failed = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(payload),
+    });
+    expect(failed.status).toBe(502);
+    const failure = await failed.json();
+    expect(failure).toMatchObject({ error: "jev_failed", reason: "timeout", usesRemaining: 3 });
+    expect(failure.id).toEqual(expect.any(String));
+    const failedRow = getEvaluation(db, failure.id);
+    expect(failedRow).toMatchObject({ status: "jev_failed", countsAsUse: 0 });
+    expect(llm.calls).toBe(0);
+
+    const retried = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": key },
+      body: JSON.stringify(payload),
+    });
+    expect(retried.status).toBe(200);
+    expect(await retried.json()).toMatchObject({ id: failure.id, usesRemaining: 2, status: "success" });
+    expect(db.select().from(evaluations).all()).toHaveLength(1);
+    expect(jev.calls).toBe(2);
+  });
+
+  it("returns 503 and writes nothing when evaluations are disabled", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm, env: { evaluationsEnabled: false } });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "77777777-7777-4777-8777-777777777777" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "evaluations_disabled" });
+    expect(jev.calls).toBe(0);
+    expect(db.select().from(evaluations).all()).toEqual([]);
+  });
+
+  it("refuses a fourth success, keeps the ledger after delete, and still blocks a fifth", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const keys = [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+    ];
+    for (const key of keys.slice(0, 3)) {
+      const res = await app.request("/v1/evaluations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": key },
+        body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(jev.calls).toBe(3);
+
+    const fourth = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": keys[3]! },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(fourth.status).toBe(409);
+    expect(await fourth.json()).toEqual({
+      error: "trial_cap",
+      message: "This trial covered three profiles. Evaluate is closed.",
+    });
+    expect(jev.calls).toBe(3);
+    expect(db.select().from(evaluations).all().some((row) => row.status === "refused_cap" && row.countsAsUse === 0)).toBe(
+      true,
+    );
+
+    const wiped = await app.request("/v1/evaluations", { method: "DELETE", headers });
+    expect(wiped.status).toBe(204);
+    expect(db.select().from(evaluations).all()).toEqual([]);
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({ successCount: 3, usesRemaining: 0 });
+
+    const fifth = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": keys[4]! },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(fifth.status).toBe(409);
+    expect(jev.calls).toBe(3);
+  });
+
+  it("records a correction, notes, history totals, and a single-row delete", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "88888888-8888-4888-8888-888888888888" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const created = await evaluated.json();
+
+    const corrected = await app.request(`/v1/evaluations/${created.id}/corrections`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action: "skip" }),
+    });
+    expect(corrected.status).toBe(201);
+    expect(await corrected.json()).toEqual({ action: "skip" });
+
+    const noted = await app.request(`/v1/evaluations/${created.id}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ notes: "Maya asked about the payments API." }),
+    });
+    expect(noted.status).toBe(200);
+    expect(await noted.json()).toEqual({ notes: "Maya asked about the payments API." });
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(history.status).toBe(200);
+    expect(await history.json()).toEqual({
+      evaluations: [
+        {
+          id: created.id,
+          action: "contact",
+          roleTitle: "Senior backend engineer",
+          jevTotalUsd: 0.00009156,
+          llmTotalUsd: 0.002556,
+          comparisonEnabled: true,
+        },
+      ],
+      totals: { jevUsd: 0.00009156, llmUsd: 0.002556 },
+    });
+
+    const removed = await app.request(`/v1/evaluations/${created.id}`, { method: "DELETE", headers });
+    expect(removed.status).toBe(204);
+    expect(getEvaluation(db, created.id)).toBeUndefined();
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({ successCount: 1, usesRemaining: 2 });
+  });
 });
 
 
