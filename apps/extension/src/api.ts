@@ -72,6 +72,28 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
         body: JSON.stringify({ criteria }),
       });
     },
+    async evaluate(body: {
+      roleId: string;
+      rubricVersionId: string;
+      approvedText: string;
+      keepExtracts: boolean;
+      comparisonEnabled: boolean;
+      idempotencyKey?: string;
+    }) {
+      const headers = new Headers();
+      if (body.idempotencyKey) headers.set("Idempotency-Key", body.idempotencyKey);
+      return request("/v1/evaluations", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          roleId: body.roleId,
+          rubricVersionId: body.rubricVersionId,
+          approvedText: body.approvedText,
+          keepExtracts: body.keepExtracts,
+          comparisonEnabled: body.comparisonEnabled,
+        }),
+      });
+    },
   };
 }
 

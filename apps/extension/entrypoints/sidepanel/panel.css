@@ -127,3 +127,53 @@ textarea {
   color: #8a2b22;
   font-size: 13px;
 }
+
+.url,
+.card p,
+.check small {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.card-head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.card-head button,
+.linkish {
+  border: 0;
+  background: none;
+  color: var(--teal);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.check span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.check input {
+  width: auto;
+  margin-top: 3px;
+}

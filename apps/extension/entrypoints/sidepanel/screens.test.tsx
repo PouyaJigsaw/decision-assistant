@@ -1,9 +1,20 @@
 /** @vitest-environment jsdom */
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PreviewScreen } from "./PreviewScreen";
 import { RoleScreen } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
+
+afterEach(() => {
+  cleanup();
+});
+
+const previewSections = [
+  { id: "headline", title: "Headline", text: "Staff engineer" },
+  { id: "about", title: "About", text: "Builds Go services" },
+  { id: "experience", title: "Experience", text: "four years" },
+];
 
 describe("RoleScreen", () => {
   it("sends the job description to draftRubric", async () => {
@@ -56,5 +67,62 @@ describe("RubricScreen", () => {
     expect(approveRubric).toHaveBeenCalledWith([
       { id: "go", kind: "requirement", label: "Go", prompt: "edited prompt" },
     ]);
+  });
+});
+
+describe("PreviewScreen", () => {
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("uploads only kept sections after confirm", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/v1/evaluations")) {
+        return new Response(JSON.stringify({ id: "e1" }), { status: 200 });
+      }
+      throw new Error(`unexpected ${String(input)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const evaluate = vi.fn(async (body: { approvedText: string }) => {
+      await fetch("http://127.0.0.1:8787/v1/evaluations", {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      return body;
+    });
+
+    render(
+      <PreviewScreen
+        url="https://www.linkedin.com/in/alex"
+        roleTitle="Senior backend"
+        sections={previewSections}
+        api={{ evaluate }}
+        onEvaluated={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Nothing is uploaded until you confirm.")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Confirming Evaluate sends the approved text to the server, then to Jev and the language model. Nothing is messaged to the candidate.",
+      ),
+    ).toBeTruthy();
+    expect(screen.getByRole("checkbox", { name: "Also run direct LLM" })).toHaveProperty("checked", true);
+    expect(screen.getByRole("checkbox", { name: "Keep extracts on the server" })).toHaveProperty("checked", false);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Remove About" }));
+    await user.click(screen.getByRole("button", { name: "Evaluate" }));
+
+    expect(evaluate).toHaveBeenCalledTimes(1);
+    const payload = evaluate.mock.calls[0]?.[0] as { approvedText: string };
+    expect(payload.approvedText).toContain("Staff engineer");
+    expect(payload.approvedText).toContain("four years");
+    expect(payload.approvedText).not.toContain("Builds Go services");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/evaluations");
   });
 });
