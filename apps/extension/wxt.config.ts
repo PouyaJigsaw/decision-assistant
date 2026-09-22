@@ -7,5 +7,6 @@ export const manifest = {
 
 export default defineConfig({
   srcDir: ".",
+  modules: ["@wxt-dev/module-react"],
   manifest,
 });
