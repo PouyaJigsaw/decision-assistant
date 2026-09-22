@@ -1,8 +1,60 @@
 import { sampleRubric } from "@decision-assistant/domain";
 import { describe, expect, it } from "vitest";
 import { createTestApp, signIn } from "./app.test-helpers";
-import { trialUses } from "./db/schema";
+import { evaluations, trialUses } from "./db/schema";
+import { FakeJev } from "./providers/fake-jev";
 import { FakeLlm } from "./providers/fake-llm";
+
+const APPROVED_TEXT = "Staff engineer. Led the payments API in Go for four years.";
+
+const contactJevPayload = {
+  model: "jev-1.13.0",
+  answers: {
+    go: {
+      type: "choice",
+      choice: "match",
+      confidence: 0.9,
+      probabilities: { match: 0.7, mismatch: 0.1, no_evidence: 0.1, contradictory: 0.1 },
+    },
+    distributed: {
+      type: "choice",
+      choice: "match",
+      confidence: 0.85,
+      probabilities: { match: 0.7, mismatch: 0.1, no_evidence: 0.1, contradictory: 0.1 },
+    },
+    "no-ownership": {
+      type: "choice",
+      choice: "mismatch",
+      confidence: 0.8,
+      probabilities: { match: 0.1, mismatch: 0.7, no_evidence: 0.1, contradictory: 0.1 },
+    },
+    seniority: {
+      type: "score",
+      score: 1.15,
+      confidence: 0.8,
+      probabilities: { "0": 0.05, "1": 0.8, "2": 0.1, "3": 0.05 },
+    },
+  },
+  usage: { input_tokens: 2180, output_tokens: 36 },
+};
+
+function contactProviders() {
+  return {
+    jev: new FakeJev(() => ({ ok: true, model: "jev-1.13.0", payload: contactJevPayload })),
+    llm: new FakeLlm({
+      compare() {
+        return {
+          model: "fake-llm",
+          excerpts: [
+            { criterionId: "go", excerpt: "Led the payments API in Go for four years." },
+            { criterionId: "distributed", excerpt: "not in the profile" },
+          ],
+          usage: { inputTokens: 412, outputTokens: 88 },
+        };
+      },
+    }),
+  };
+}
 
 describe("GET /v1/health", () => {
   it("reports the database without calling a provider", async () => {
@@ -176,6 +228,66 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
     expect(db.select().from(trialUses).all()).toEqual([]);
     const me = await app.request("/v1/me", { headers });
     expect(await me.json()).toMatchObject({ successCount: 0, usesRemaining: 3 });
+  });
+});
+
+describe("POST /v1/evaluations", () => {
+  it("evaluates a profile, grounds excerpts, and spends one trial use", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    const role = await created.json();
+    const approved = await app.request(`/v1/roles/${role.id}/rubrics`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ criteria: sampleRubric }),
+    });
+    const rubric = await approved.json();
+
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "11111111-1111-4111-8111-111111111111" },
+      body: JSON.stringify({
+        roleId: role.id,
+        rubricVersionId: rubric.id,
+        approvedText: APPROVED_TEXT,
+        keepExtracts: true,
+        comparisonEnabled: true,
+      }),
+    });
+    expect(evaluated.status).toBe(200);
+    const body = await evaluated.json();
+    expect(body).toMatchObject({
+      status: "success",
+      action: "contact",
+      countsAsUse: true,
+      usesRemaining: 2,
+      replayed: false,
+      jev: { model: "jev-1.13.0", cost: { outputUsd: 0 } },
+    });
+    expect(body.answers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          criterionId: "go",
+          excerpt: null,
+          llmExcerpt: "Led the payments API in Go for four years.",
+        }),
+        expect.objectContaining({
+          criterionId: "distributed",
+          excerpt: null,
+          llmExcerpt: null,
+        }),
+      ]),
+    );
+    expect(jev.calls).toBe(1);
+    expect(llm.calls).toBe(1);
+    expect(db.select().from(evaluations).get()?.approvedText).toBe(APPROVED_TEXT);
   });
 });
 
