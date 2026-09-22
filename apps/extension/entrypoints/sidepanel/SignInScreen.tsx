@@ -16,22 +16,24 @@ export function SignInScreen({
   }
 
   return (
-    <section>
-      <header>
+    <section className="panel">
+      <header className="panel-brand">
         <h1>Decision Assistant</h1>
         <p>Local backbone</p>
       </header>
-      <form onSubmit={handleSubmit}>
-        <label>
-          Email
+      <form className="stack" onSubmit={handleSubmit}>
+        <label className="stack">
+          <span className="field-label">Email</span>
           <input type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
         </label>
-        <label>
-          Password
+        <label className="stack">
+          <span className="field-label">Password</span>
           <input type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
         </label>
-        <button type="submit">Sign in</button>
-        {error ? <p>{error}</p> : null}
+        <button className="primary" type="submit">
+          Sign in
+        </button>
+        {error ? <p className="error">{error}</p> : null}
       </form>
     </section>
   );

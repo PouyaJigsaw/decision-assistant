@@ -57,6 +57,21 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
     async me() {
       return request("/v1/me");
     },
+    async createRole(title: string) {
+      return request("/v1/roles", { method: "POST", body: JSON.stringify({ title }) });
+    },
+    async draftRubric(roleId: string, notes: string) {
+      return request(`/v1/roles/${roleId}/rubric-drafts`, {
+        method: "POST",
+        body: JSON.stringify({ notes }),
+      });
+    },
+    async approveRubric(roleId: string, criteria: unknown[]) {
+      return request(`/v1/roles/${roleId}/rubrics`, {
+        method: "POST",
+        body: JSON.stringify({ criteria }),
+      });
+    },
   };
 }
 
