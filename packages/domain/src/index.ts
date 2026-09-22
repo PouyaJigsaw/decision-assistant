@@ -5,3 +5,4 @@ export * from "./jev";
 export * from "./safety";
 export * from "./recommend";
 export * from "./cost";
+export * from "./trial";
