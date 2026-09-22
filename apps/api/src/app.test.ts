@@ -318,6 +318,75 @@ describe("POST /v1/evaluations", () => {
     expect(db.select().from(evaluations).get()?.approvedText).toBe(APPROVED_TEXT);
   });
 
+  it("rejects a jev-latest payload as invalid_jev without calling compare", async () => {
+    const payload = { ...contactJevPayload, model: "jev-latest" };
+    const jev = new FakeJev(() => ({ ok: true, model: "jev-latest", payload }));
+    const llm = new FakeLlm({
+      compare() {
+        return {
+          model: "fake-llm",
+          excerpts: [{ criterionId: "go", excerpt: "Led the payments API in Go for four years." }],
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "aaaa1111-1111-4111-8111-111111111111" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({
+      error: "jev_failed",
+      reason: "invalid_jev",
+      usesRemaining: 3,
+    });
+    expect(llm.calls).toBe(0);
+  });
+
+  it("grounds an excerpt that is not in the approved text to null and still counts the use", async () => {
+    const jev = new FakeJev(() => ({ ok: true, model: "jev-1.13.0", payload: contactJevPayload }));
+    const llm = new FakeLlm({
+      compare() {
+        return {
+          model: "fake-llm",
+          excerpts: [
+            { criterionId: "go", excerpt: "Python for ten years" },
+            { criterionId: "distributed", excerpt: "Python for ten years" },
+            { criterionId: "no-ownership", excerpt: "Python for ten years" },
+            { criterionId: "seniority", excerpt: "Python for ten years" },
+          ],
+          usage: { inputTokens: 412, outputTokens: 88 },
+        };
+      },
+    });
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "bbbb2222-2222-4222-8222-222222222222" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      countsAsUse: true,
+      usesRemaining: 2,
+    });
+    expect(body.answers).toEqual(
+      expect.arrayContaining(
+        ["go", "distributed", "no-ownership", "seniority"].map((criterionId) =>
+          expect.objectContaining({ criterionId, llmExcerpt: null }),
+        ),
+      ),
+    );
+    expect(body.answers).toHaveLength(4);
+  });
+
   it("replays the same key and body without calling Jev again", async () => {
     const { jev, llm } = contactProviders();
     const { app } = createTestApp({ jev, llm });

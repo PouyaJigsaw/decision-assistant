@@ -15,6 +15,10 @@ export function createTestApp(
     host: "127.0.0.1",
     port: 8787,
     llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
+    providers: "fake",
+    typesafeApiKey: "",
+    anthropicApiKey: "",
+    anthropicModel: "",
     ...options.env,
   };
   const db = options.db ?? openDatabase(":memory:");
