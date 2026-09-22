@@ -1,3 +1,4 @@
+import type { Hono } from "hono";
 import { createApp } from "./app";
 import { seedUser } from "./auth";
 import { openDatabase } from "./db/client";
@@ -30,4 +31,17 @@ export function createTestApp() {
   };
   const app = createApp({ db, jev, llm, env });
   return { app, db, jev, llm, env };
+}
+
+export async function signIn(app: Hono) {
+  const res = await app.request("/v1/session", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: "recruiter@example.com", password: "sitting-password" }),
+  });
+  const body = (await res.json()) as { token: string };
+  return {
+    token: body.token,
+    headers: { authorization: `Bearer ${body.token}`, "content-type": "application/json" },
+  };
 }

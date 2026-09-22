@@ -1,5 +1,6 @@
+import { sampleRubric } from "@decision-assistant/domain";
 import { describe, expect, it } from "vitest";
-import { createTestApp } from "./app.test-helpers";
+import { createTestApp, signIn } from "./app.test-helpers";
 
 describe("GET /v1/health", () => {
   it("reports the database without calling a provider", async () => {
@@ -50,4 +51,73 @@ describe("POST /v1/session", () => {
     expect(await anonymous.json()).toEqual({ error: "unauthorized" });
   });
 });
+
+describe("roles and rubrics", () => {
+  it("versions an approved rubric and rejects a protected prompt", async () => {
+    const { app } = createTestApp();
+    const { headers } = await signIn(app);
+
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    expect(created.status).toBe(201);
+    const role = await created.json();
+    expect(role).toEqual({ id: expect.any(String), title: "Senior backend engineer" });
+
+    const first = await app.request(`/v1/roles/${role.id}/rubrics`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ criteria: sampleRubric }),
+    });
+    expect(first.status).toBe(201);
+    expect(await first.json()).toEqual({
+      id: expect.any(String),
+      version: 1,
+      criteria: sampleRubric,
+    });
+
+    const unsafe = sampleRubric.map((criterion) =>
+      criterion.id === "go"
+        ? { ...criterion, prompt: "Is the candidate's age over 40?" }
+        : criterion,
+    );
+    const rejected = await app.request(`/v1/roles/${role.id}/rubrics`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ criteria: unsafe }),
+    });
+    expect(rejected.status).toBe(422);
+    expect(await rejected.json()).toEqual({
+      error: "invalid_rubric",
+      reason: "safety",
+      term: "age",
+    });
+
+    const stillFirst = await app.request(`/v1/roles/${role.id}/rubrics/current`, { headers });
+    expect(stillFirst.status).toBe(200);
+    expect(await stillFirst.json()).toMatchObject({ version: 1 });
+
+    const second = await app.request(`/v1/roles/${role.id}/rubrics`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        criteria: sampleRubric.map((criterion) =>
+          criterion.id === "distributed"
+            ? { ...criterion, prompt: "Is there evidence of large-scale distributed systems work?" }
+            : criterion,
+        ),
+      }),
+    });
+    expect(second.status).toBe(201);
+    const v2 = await second.json();
+    expect(v2.version).toBe(2);
+
+    const current = await app.request(`/v1/roles/${role.id}/rubrics/current`, { headers });
+    expect(current.status).toBe(200);
+    expect(await current.json()).toMatchObject({ version: 2, criteria: v2.criteria });
+  });
+});
+
 
