@@ -28,7 +28,7 @@ import {
   verifyPassword,
 } from "./auth";
 import type { AppDatabase } from "./db/client";
-import { corrections, evaluations, roles, rubricVersions, trialUses } from "./db/schema";
+import { corrections, evaluations, roles, rubricVersions, spendEvents, trialUses } from "./db/schema";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
 
@@ -430,6 +430,7 @@ export function createApp(deps: {
   app.delete("/v1/evaluations/:id", requireUser, (c) => {
     const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    archiveSpend(db, [row]);
     db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
     db.delete(evaluations).where(eq(evaluations.id, row.id)).run();
     return c.body(null, 204);
@@ -437,6 +438,7 @@ export function createApp(deps: {
 
   app.delete("/v1/evaluations", requireUser, (c) => {
     const rows = db.select().from(evaluations).where(eq(evaluations.userId, c.get("user").id)).all();
+    archiveSpend(db, rows);
     for (const row of rows) {
       db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
     }
@@ -484,16 +486,38 @@ function spendToday(db: AppDatabase, userId: string, now = Date.now()) {
   const day = new Date(now);
   const start = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
   const end = start + 86_400_000;
-  const rows = db
+  const live = db
     .select()
     .from(evaluations)
     .where(and(eq(evaluations.userId, userId), gte(evaluations.createdAt, start), lt(evaluations.createdAt, end)))
     .all();
-  return rows.reduce(
+  const archived = db
+    .select()
+    .from(spendEvents)
+    .where(and(eq(spendEvents.userId, userId), gte(spendEvents.createdAt, start), lt(spendEvents.createdAt, end)))
+    .all();
+  return [...live, ...archived].reduce(
     (sum, row) =>
       sum + (row.jevInputUsd ?? 0) + (row.jevOutputUsd ?? 0) + (row.llmInputUsd ?? 0) + (row.llmOutputUsd ?? 0),
     0,
   );
+}
+
+function archiveSpend(db: AppDatabase, rows: Array<typeof evaluations.$inferSelect>) {
+  for (const row of rows) {
+    db.insert(spendEvents)
+      .values({
+        id: crypto.randomUUID(),
+        userId: row.userId,
+        evaluationId: row.id,
+        createdAt: row.createdAt,
+        jevInputUsd: row.jevInputUsd,
+        jevOutputUsd: row.jevOutputUsd,
+        llmInputUsd: row.llmInputUsd,
+        llmOutputUsd: row.llmOutputUsd,
+      })
+      .run();
+  }
 }
 
 function ownedRubric(db: AppDatabase, rubricVersionId: string, userId: string) {

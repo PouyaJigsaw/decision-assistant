@@ -212,6 +212,39 @@ describe("ErrorScreen", () => {
 
     expect(screen.getByText("This trial covered three profiles. Evaluate is closed.")).toBeTruthy();
   });
+
+  it("renders a spend-cap error without blaming Jev or offering Retry", () => {
+    render(
+      <ErrorScreen
+        error={{ status: 503, body: { error: "daily_spend_cap" } }}
+        usesRemaining={2}
+        onRetry={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Evaluate is closed.")).toBeTruthy();
+    expect(screen.getByText("Today's spend limit is reached. Evaluate is closed.")).toBeTruthy();
+    expect(
+      screen.queryByText(
+        "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.",
+      ),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
+
+  it("renders a kill-switch error without blaming Jev or offering Retry", () => {
+    render(
+      <ErrorScreen
+        error={{ status: 503, body: { error: "evaluations_disabled" } }}
+        usesRemaining={2}
+        onRetry={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Evaluate is closed.")).toBeTruthy();
+    expect(screen.getByText("Evaluate is turned off. No provider call was made.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+  });
 });
 
 describe("EvaluatingScreen", () => {

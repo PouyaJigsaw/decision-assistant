@@ -83,3 +83,14 @@ export const trialUses = sqliteTable("trial_uses", {
   evaluationId: text("evaluation_id").notNull().unique(),
   createdAt: integer("created_at").notNull(),
 });
+
+export const spendEvents = sqliteTable("spend_events", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  evaluationId: text("evaluation_id").notNull().unique(),
+  createdAt: integer("created_at").notNull(),
+  jevInputUsd: real("jev_input_usd"),
+  jevOutputUsd: real("jev_output_usd"),
+  llmInputUsd: real("llm_input_usd"),
+  llmOutputUsd: real("llm_output_usd"),
+});

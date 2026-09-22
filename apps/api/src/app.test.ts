@@ -758,6 +758,27 @@ describe("daily spend cap", () => {
     expect(res.status).toBe(200);
     expect(jev.calls).toBe(1);
   });
+
+  it("still returns 503 after history is cleared when today's spend was already at the cap", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm, env: { dailySpendCapUsd: 5 } });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const user = db.select().from(users).get();
+    insertSpendRow(db, user!.id, role.id, rubric.id, Date.now(), 4, 1);
+
+    const wiped = await app.request("/v1/evaluations", { method: "DELETE", headers });
+    expect(wiped.status).toBe(204);
+
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: "daily_spend_cap" });
+    expect(jev.calls).toBe(0);
+  });
 });
 
 

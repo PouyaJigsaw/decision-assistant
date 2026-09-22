@@ -1,3 +1,4 @@
+# Deploy from the repo root: fly deploy -c apps/api/fly.toml
 app = "decision-assistant"
 primary_region = "sjc"
 

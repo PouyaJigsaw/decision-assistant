@@ -98,4 +98,16 @@ function migrate(db: AppDatabase): void {
       created_at integer NOT NULL
     )
   `);
+  db.run(sql`
+    CREATE TABLE IF NOT EXISTS spend_events (
+      id text PRIMARY KEY,
+      user_id text NOT NULL,
+      evaluation_id text NOT NULL UNIQUE,
+      created_at integer NOT NULL,
+      jev_input_usd real,
+      jev_output_usd real,
+      llm_input_usd real,
+      llm_output_usd real
+    )
+  `);
 }
