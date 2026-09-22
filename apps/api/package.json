@@ -3,7 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "start": "node --experimental-strip-types --no-warnings src/index.ts"
+  },
   "dependencies": {
     "@decision-assistant/domain": "workspace:*",
     "@hono/node-server": "^1.13.8",

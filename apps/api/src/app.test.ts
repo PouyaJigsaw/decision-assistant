@@ -6,6 +6,7 @@ import { createTestApp, signIn } from "./app.test-helpers";
 import { evaluations, trialUses } from "./db/schema";
 import { FakeJev } from "./providers/fake-jev";
 import { FakeLlm } from "./providers/fake-llm";
+import { createRuntimeProviders } from "./providers/runtime-fakes";
 
 const APPROVED_TEXT = "Staff engineer. Led the payments API in Go for four years.";
 
@@ -58,7 +59,7 @@ function contactProviders() {
   };
 }
 
-async function approveRubric(app: Hono, headers: Record<string, string>) {
+async function approveRubric(app: Hono<any>, headers: Record<string, string>) {
   const created = await app.request("/v1/roles", {
     method: "POST",
     headers,
@@ -84,6 +85,22 @@ function evaluateBody(roleId: string, rubricVersionId: string, overrides: Record
     ...overrides,
   };
 }
+
+describe("runtime fakes", () => {
+  it("can complete an evaluate without test-only stubs", async () => {
+    const { jev, llm } = createRuntimeProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(evaluated.status).toBe(200);
+    expect(await evaluated.json()).toMatchObject({ status: "success", action: "contact", replayed: false });
+  });
+});
 
 describe("GET /v1/health", () => {
   it("reports the database without calling a provider", async () => {
@@ -402,6 +419,21 @@ describe("POST /v1/evaluations", () => {
         cost: { inputUsd: 0.001236, outputUsd: 0.00132, totalUsd: 0.002556 },
       },
     });
+  });
+
+  it("rejects blank approved text before calling Jev", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const res = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "99999999-9999-4999-8999-999999999999" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id, { approvedText: "   " })),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "invalid_body" });
+    expect(jev.calls).toBe(0);
   });
 
   it("retries a Jev timeout on the same key and then spends one use", async () => {

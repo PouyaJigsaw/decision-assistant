@@ -16,7 +16,6 @@ import {
 } from "@decision-assistant/domain";
 import { createHash } from "node:crypto";
 import { and, desc, eq } from "drizzle-orm";
-import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
 import { z } from "zod";
@@ -36,12 +35,12 @@ import type { JevClient, LlmClient } from "./providers/types";
 type AppVariables = { user: { id: string; email: string } };
 
 export function createApp(deps: {
-  db: BetterSQLite3Database;
+  db: AppDatabase;
   jev: JevClient;
   llm: LlmClient;
   env: Env;
-}): Hono {
-  const db = deps.db as AppDatabase;
+}): Hono<{ Variables: AppVariables }> {
+  const db = deps.db;
   const app = new Hono<{ Variables: AppVariables }>();
 
   async function requireUser(c: Context<{ Variables: AppVariables }>, next: Next) {
@@ -100,7 +99,7 @@ export function createApp(deps: {
   });
 
   app.post("/v1/roles/:roleId/rubrics", requireUser, async (c) => {
-    const role = ownedRole(db, c.req.param("roleId"), c.get("user").id);
+    const role = ownedRole(db, routeParam(c, "roleId"), c.get("user").id);
     if (!role) return c.json({ error: "role_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const parsed = z.array(criterionSchema).safeParse(body?.criteria);
@@ -135,7 +134,7 @@ export function createApp(deps: {
   });
 
   app.post("/v1/roles/:roleId/rubric-drafts", requireUser, async (c) => {
-    const role = ownedRole(db, c.req.param("roleId"), c.get("user").id);
+    const role = ownedRole(db, routeParam(c, "roleId"), c.get("user").id);
     if (!role) return c.json({ error: "role_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const notes = body && typeof body.notes === "string" ? body.notes : "";
@@ -305,44 +304,61 @@ export function createApp(deps: {
     const jevCost = costFromUsage(parsed.usage, JEV_PRICE);
     const used = countsAsUse({ jevValid: true, idempotencyReplay: false });
     const finishedAt = Date.now();
-    db.update(evaluations)
-      .set({
-        status: "success",
-        countsAsUse: used ? 1 : 0,
-        action: rec.action,
-        score: rec.score,
-        reasonCode: rec.reasonCode,
-        answersJson: JSON.stringify(answers),
-        jevModel: parsed.model,
-        jevInputTokens: parsed.usage.inputTokens,
-        jevOutputTokens: parsed.usage.outputTokens,
-        jevInputUsd: jevCost.inputUsd,
-        jevOutputUsd: jevCost.outputUsd,
-        llmModel: llm?.model ?? null,
-        llmInputTokens: llm?.usage.inputTokens ?? null,
-        llmOutputTokens: llm?.usage.outputTokens ?? null,
-        llmInputUsdPerMillion: llm ? deps.env.llmPrice.inputUsdPerMillion : null,
-        llmOutputUsdPerMillion: llm ? deps.env.llmPrice.outputUsdPerMillion : null,
-        llmInputUsd: llm?.cost.inputUsd ?? null,
-        llmOutputUsd: llm?.cost.outputUsd ?? null,
-        approvedText: keepExtracts ? approvedText : null,
-        keepExtracts: keepExtracts ? 1 : 0,
-        comparisonEnabled: comparisonEnabled ? 1 : 0,
-        updatedAt: finishedAt,
-      })
-      .where(eq(evaluations.id, id))
-      .run();
-    if (used) {
-      db.insert(trialUses)
-        .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: finishedAt })
+    const committed = db.transaction((tx) => {
+      const liveCount = tx.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
+      if (liveCount >= TRIAL_SUCCESS_CAP) {
+        tx.update(evaluations)
+          .set({ status: "refused_cap", countsAsUse: 0, updatedAt: finishedAt })
+          .where(eq(evaluations.id, id))
+          .run();
+        return { kind: "cap" as const };
+      }
+      tx.update(evaluations)
+        .set({
+          status: "success",
+          countsAsUse: used ? 1 : 0,
+          action: rec.action,
+          score: rec.score,
+          reasonCode: rec.reasonCode,
+          answersJson: JSON.stringify(answers),
+          jevModel: parsed.model,
+          jevInputTokens: parsed.usage.inputTokens,
+          jevOutputTokens: parsed.usage.outputTokens,
+          jevInputUsd: jevCost.inputUsd,
+          jevOutputUsd: jevCost.outputUsd,
+          llmModel: llm?.model ?? null,
+          llmInputTokens: llm?.usage.inputTokens ?? null,
+          llmOutputTokens: llm?.usage.outputTokens ?? null,
+          llmInputUsdPerMillion: llm ? deps.env.llmPrice.inputUsdPerMillion : null,
+          llmOutputUsdPerMillion: llm ? deps.env.llmPrice.outputUsdPerMillion : null,
+          llmInputUsd: llm?.cost.inputUsd ?? null,
+          llmOutputUsd: llm?.cost.outputUsd ?? null,
+          approvedText: keepExtracts ? approvedText : null,
+          keepExtracts: keepExtracts ? 1 : 0,
+          comparisonEnabled: comparisonEnabled ? 1 : 0,
+          updatedAt: finishedAt,
+        })
+        .where(eq(evaluations.id, id))
         .run();
+      if (used) {
+        tx.insert(trialUses)
+          .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: finishedAt })
+          .run();
+      }
+      return { kind: "ok" as const, remaining: usesRemaining(liveCount + (used ? 1 : 0)) };
+    });
+    if (committed.kind === "cap") {
+      return c.json(
+        { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
+        409,
+      );
     }
     const stored = getEvaluation(db, id);
-    return c.json(toEvaluationResponse(stored!, usesRemaining(successCount + (used ? 1 : 0)), false));
+    return c.json(toEvaluationResponse(stored!, committed.remaining, false));
   });
 
   app.get("/v1/evaluations/:id", requireUser, (c) => {
-    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
     const successCount = db.select().from(trialUses).where(eq(trialUses.userId, c.get("user").id)).all().length;
     return c.json(toEvaluationResponse(row, usesRemaining(successCount), false));
@@ -373,7 +389,7 @@ export function createApp(deps: {
   });
 
   app.post("/v1/evaluations/:id/corrections", requireUser, async (c) => {
-    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const parsed = actionBody.safeParse(body);
@@ -390,7 +406,7 @@ export function createApp(deps: {
   });
 
   app.patch("/v1/evaluations/:id", requireUser, async (c) => {
-    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const parsed = notesBody.safeParse(body);
@@ -400,7 +416,7 @@ export function createApp(deps: {
   });
 
   app.delete("/v1/evaluations/:id", requireUser, (c) => {
-    const row = ownedEvaluation(db, c.req.param("id"), c.get("user").id);
+    const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
     db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
     db.delete(evaluations).where(eq(evaluations.id, row.id)).run();
@@ -417,7 +433,7 @@ export function createApp(deps: {
   });
 
   app.get("/v1/roles/:roleId/rubrics/current", requireUser, (c) => {
-    const role = ownedRole(db, c.req.param("roleId"), c.get("user").id);
+    const role = ownedRole(db, routeParam(c, "roleId"), c.get("user").id);
     if (!role) return c.json({ error: "rubric_not_found" }, 404);
     const latest = db
       .select()
@@ -471,15 +487,19 @@ const notesBody = z.object({
 const evaluateBody = z.object({
   roleId: z.string().min(1),
   rubricVersionId: z.string().min(1),
-  approvedText: z.string(),
+  approvedText: z.string().trim().min(1),
   keepExtracts: z.boolean(),
   comparisonEnabled: z.boolean().default(true),
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export function getEvaluation(db: BetterSQLite3Database, id: string) {
-  return (db as AppDatabase).select().from(evaluations).where(eq(evaluations.id, id)).get();
+function routeParam(c: Context<{ Variables: AppVariables }>, name: string): string {
+  return c.req.param(name) ?? "";
+}
+
+export function getEvaluation(db: AppDatabase, id: string) {
+  return db.select().from(evaluations).where(eq(evaluations.id, id)).get();
 }
 
 function toEvaluationResponse(

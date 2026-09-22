@@ -12,6 +12,7 @@ export function createTestApp(
     accountEmail: "recruiter@example.com",
     accountPassword: "sitting-password",
     evaluationsEnabled: true,
+    host: "127.0.0.1",
     port: 8787,
     llmPrice: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
     ...options.env,
@@ -37,7 +38,7 @@ export function createTestApp(
   return { app, db, jev, llm, env };
 }
 
-export async function signIn(app: Hono) {
+export async function signIn(app: Hono<any>) {
   const res = await app.request("/v1/session", {
     method: "POST",
     headers: { "content-type": "application/json" },
