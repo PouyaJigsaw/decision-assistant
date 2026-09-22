@@ -20,6 +20,20 @@ function titleFromNotes(notes: string) {
   return line.slice(0, 80) || "Role";
 }
 
+function asExtract(value: unknown): { url: string; sections: ExtractSection[] } | null {
+  if (!value || typeof value !== "object") return null;
+  const rec = value as { url?: string; sections?: ExtractSection[] };
+  if (typeof rec.url === "string" && Array.isArray(rec.sections)) return { url: rec.url, sections: rec.sections };
+  return null;
+}
+
+function asRole(value: unknown): { id: string; title: string } | null {
+  if (!value || typeof value !== "object") return null;
+  const rec = value as { id?: string; title?: string };
+  if (typeof rec.id === "string" && typeof rec.title === "string") return { id: rec.id, title: rec.title };
+  return null;
+}
+
 function withLabels(evaluation: ResultEvaluation, criteria: DraftResult["criteria"]): ResultEvaluation {
   const labels = new Map(criteria.map((item) => [item.id, item.label]));
   return {
@@ -55,11 +69,30 @@ export function App() {
       try {
         const me = await api.me();
         setUsesRemaining(me.usesRemaining);
-        setScreen("role");
+        const stored = await chrome.storage.session.get(["panelRole", "panelRubricId", "panelCriteria", "extract"]);
+        const nextRole = asRole(stored.panelRole);
+        const nextRubric = typeof stored.panelRubricId === "string" ? stored.panelRubricId : null;
+        const nextCriteria = Array.isArray(stored.panelCriteria) ? stored.panelCriteria : [];
+        const nextExtract = asExtract(stored.extract);
+        if (nextRole) setRole(nextRole);
+        if (nextRubric) setRubricId(nextRubric);
+        if (nextCriteria.length) setCriteria(nextCriteria);
+        if (nextExtract) setExtract(nextExtract);
+        setScreen(nextRole && nextRubric ? "preview" : "role");
       } catch {
         setScreen("signin");
       }
     })();
+
+    function onExtractChanged(changes: Record<string, { newValue?: unknown }>) {
+      if (!("extract" in changes)) return;
+      const next = asExtract(changes.extract?.newValue);
+      if (!next) return;
+      setExtract(next);
+      setScreen((current) => (current === "signin" || current === "boot" || current === "role" || current === "rubric" ? current : "preview"));
+    }
+    chrome.storage.session.onChanged.addListener(onExtractChanged);
+    return () => chrome.storage.session.onChanged.removeListener(onExtractChanged);
   }, []);
 
   const runEvaluate = useCallback(
@@ -85,7 +118,8 @@ export function App() {
           setScreen("error");
           return;
         }
-        throw error;
+        setPanelError({ status: 0, body: { error: "network" } });
+        setScreen("error");
       }
     },
     [role, rubricId, criteria],
@@ -96,6 +130,7 @@ export function App() {
       async draftRubric(notes: string) {
         const created = await api.createRole(titleFromNotes(notes));
         setRole(created);
+        await chrome.storage.session.set({ panelRole: created });
         return api.draftRubric(created.id, notes);
       },
     }),
@@ -109,6 +144,7 @@ export function App() {
         const approved = await api.approveRubric(role.id, next);
         setCriteria(next);
         setRubricId(approved.id);
+        await chrome.storage.session.set({ panelRubricId: approved.id, panelCriteria: next });
         return approved;
       },
     }),
