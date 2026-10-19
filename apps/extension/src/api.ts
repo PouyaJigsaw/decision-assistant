@@ -16,16 +16,29 @@ export class ApiError extends Error {
   }
 }
 
+function storedToken(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
 export function chromeTokenStore(): TokenStore {
   return {
     async get() {
-      const stored = await chrome.storage.session.get("sessionToken");
-      return typeof stored.sessionToken === "string" ? stored.sessionToken : null;
+      const local = await chrome.storage.local.get("sessionToken");
+      const localToken = storedToken(local.sessionToken);
+      if (localToken) return localToken;
+      const session = await chrome.storage.session.get("sessionToken");
+      const sessionToken = storedToken(session.sessionToken);
+      if (!sessionToken) return null;
+      await chrome.storage.local.set({ sessionToken });
+      await chrome.storage.session.remove("sessionToken");
+      return sessionToken;
     },
     async set(token: string) {
-      await chrome.storage.session.set({ sessionToken: token });
+      await chrome.storage.local.set({ sessionToken: token });
+      await chrome.storage.session.remove("sessionToken");
     },
     async clear() {
+      await chrome.storage.local.remove("sessionToken");
       await chrome.storage.session.remove("sessionToken");
     },
   };

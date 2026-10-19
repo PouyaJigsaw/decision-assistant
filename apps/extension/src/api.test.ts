@@ -1,4 +1,28 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+function memoryChrome() {
+  const local: Record<string, unknown> = {};
+  const session: Record<string, unknown> = {};
+  function area(store: Record<string, unknown>) {
+    return {
+      async get(key: string | string[]) {
+        if (Array.isArray(key)) {
+          const found: Record<string, unknown> = {};
+          for (const item of key) found[item] = store[item];
+          return found;
+        }
+        return { [key]: store[key] };
+      },
+      async set(values: Record<string, unknown>) {
+        Object.assign(store, values);
+      },
+      async remove(keys: string | string[]) {
+        for (const key of Array.isArray(keys) ? keys : [keys]) delete store[key];
+      },
+    };
+  }
+  return { local, session, chrome: { storage: { local: area(local), session: area(session) } } };
+}
 
 describe("createApi", () => {
   afterEach(() => {
@@ -254,5 +278,43 @@ describe("createApi", () => {
     await api.logout();
     expect(token).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("chromeTokenStore", () => {
+  let local: Record<string, unknown>;
+  let session: Record<string, unknown>;
+
+  beforeEach(() => {
+    const memory = memoryChrome();
+    local = memory.local;
+    session = memory.session;
+    vi.stubGlobal("chrome", memory.chrome);
+  });
+
+  it("keeps the token in local storage so a later store still sees it", async () => {
+    const { chromeTokenStore } = await import("./api");
+    await chromeTokenStore().set("tok-1");
+    expect(local.sessionToken).toBe("tok-1");
+    expect(session.sessionToken).toBeUndefined();
+    await expect(chromeTokenStore().get()).resolves.toBe("tok-1");
+  });
+
+  it("copies a leftover session token into local storage", async () => {
+    const { chromeTokenStore } = await import("./api");
+    session.sessionToken = "tok-old";
+    await expect(chromeTokenStore().get()).resolves.toBe("tok-old");
+    expect(local.sessionToken).toBe("tok-old");
+    expect(session.sessionToken).toBeUndefined();
+  });
+
+  it("clears the local token", async () => {
+    const { chromeTokenStore } = await import("./api");
+    local.sessionToken = "tok-1";
+    session.sessionToken = "tok-session";
+    await chromeTokenStore().clear();
+    await expect(chromeTokenStore().get()).resolves.toBeNull();
+    expect(local.sessionToken).toBeUndefined();
+    expect(session.sessionToken).toBeUndefined();
   });
 });

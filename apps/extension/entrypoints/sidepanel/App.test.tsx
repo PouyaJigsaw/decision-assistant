@@ -4,14 +4,55 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const chromeState = vi.hoisted(() => {
-  const store: Record<string, unknown> = {};
+  const local: Record<string, unknown> = {};
+  const session: Record<string, unknown> = {};
   const listeners: Array<(changes: Record<string, { newValue: unknown }>) => void> = [];
+  function area(store: Record<string, unknown>, notify = false) {
+    return {
+      async get(key: string | string[]) {
+        if (Array.isArray(key)) {
+          const found: Record<string, unknown> = {};
+          for (const item of key) found[item] = store[item];
+          return found;
+        }
+        return { [key]: store[key] };
+      },
+      async set(values: Record<string, unknown>) {
+        const changes: Record<string, { newValue: unknown }> = {};
+        for (const [key, value] of Object.entries(values)) {
+          store[key] = value;
+          changes[key] = { newValue: value };
+        }
+        if (notify) for (const listener of listeners) listener(changes);
+      },
+      async remove(keys: string | string[]) {
+        for (const key of Array.isArray(keys) ? keys : [keys]) delete store[key];
+      },
+    };
+  }
   return {
-    store,
+    local,
+    session,
     listeners,
     reset() {
-      for (const key of Object.keys(store)) delete store[key];
+      for (const key of Object.keys(local)) delete local[key];
+      for (const key of Object.keys(session)) delete session[key];
       listeners.length = 0;
+    },
+    storage: {
+      local: area(local),
+      session: {
+        ...area(session, true),
+        onChanged: {
+          addListener(listener: (changes: Record<string, { newValue: unknown }>) => void) {
+            listeners.push(listener);
+          },
+          removeListener(listener: (changes: Record<string, { newValue: unknown }>) => void) {
+            const index = listeners.indexOf(listener);
+            if (index >= 0) listeners.splice(index, 1);
+          },
+        },
+      },
     },
   };
 });
@@ -27,54 +68,7 @@ vi.stubGlobal("chrome", {
     onErrorOccurred: { addListener() {}, removeListener() {} },
     onCommitted: { addListener() {}, removeListener() {} },
   },
-  storage: {
-    local: {
-      async get(key: string | string[]) {
-        if (Array.isArray(key)) {
-          const found: Record<string, unknown> = {};
-          for (const item of key) found[item] = chromeState.store[item];
-          return found;
-        }
-        return { [key]: chromeState.store[key] };
-      },
-      async set(values: Record<string, unknown>) {
-        Object.assign(chromeState.store, values);
-      },
-      async remove(keys: string | string[]) {
-        for (const key of Array.isArray(keys) ? keys : [keys]) delete chromeState.store[key];
-      },
-    },
-    session: {
-      async get(key: string | string[]) {
-        if (Array.isArray(key)) {
-          const found: Record<string, unknown> = {};
-          for (const item of key) found[item] = chromeState.store[item];
-          return found;
-        }
-        return { [key]: chromeState.store[key] };
-      },
-      async set(values: Record<string, unknown>) {
-        const changes: Record<string, { newValue: unknown }> = {};
-        for (const [key, value] of Object.entries(values)) {
-          chromeState.store[key] = value;
-          changes[key] = { newValue: value };
-        }
-        for (const listener of chromeState.listeners) listener(changes);
-      },
-      async remove(keys: string | string[]) {
-        for (const key of Array.isArray(keys) ? keys : [keys]) delete chromeState.store[key];
-      },
-      onChanged: {
-        addListener(listener: (changes: Record<string, { newValue: unknown }>) => void) {
-          chromeState.listeners.push(listener);
-        },
-        removeListener(listener: (changes: Record<string, { newValue: unknown }>) => void) {
-          const index = chromeState.listeners.indexOf(listener);
-          if (index >= 0) chromeState.listeners.splice(index, 1);
-        },
-      },
-    },
-  },
+  storage: chromeState.storage,
 });
 
 const { App } = await import("./App");
@@ -96,12 +90,12 @@ function json(data: unknown, status = 200) {
 describe("App sitting flow", () => {
   beforeEach(() => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
-    chromeState.store.panelRole = { id: "role-1", title: "Senior backend" };
-    chromeState.store.panelRubricId = "rubric-1";
-    chromeState.store.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
-    chromeState.store.extract = extract;
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
+    chromeState.session.panelRole = { id: "role-1", title: "Senior backend" };
+    chromeState.session.panelRubricId = "rubric-1";
+    chromeState.session.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
+    chromeState.session.extract = extract;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -339,7 +333,7 @@ describe("App sign up", () => {
 
     expect(await screen.findByRole("button", { name: "New job description" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Create a role" })).toBeNull();
-    expect(chromeState.store.sessionToken).toBe("tok-signup");
+    expect(chromeState.local.sessionToken).toBe("tok-signup");
     expect(fetchMock.mock.calls.some(([input, init]) => String(input).endsWith("/v1/session") && init?.method === "POST")).toBe(
       false,
     );
@@ -463,8 +457,8 @@ describe("App dashboard", () => {
 
   it("opens Role from New job description", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
@@ -478,12 +472,12 @@ describe("App dashboard", () => {
 
   it("opens preview copy from Continue when a rubric is stored", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
-    chromeState.store.panelRole = { id: "role-1", title: "Senior backend" };
-    chromeState.store.panelRubricId = "rubric-1";
-    chromeState.store.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
-    chromeState.store.extract = extract;
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
+    chromeState.session.panelRole = { id: "role-1", title: "Senior backend" };
+    chromeState.session.panelRubricId = "rubric-1";
+    chromeState.session.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
+    chromeState.session.extract = extract;
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
@@ -494,8 +488,8 @@ describe("App dashboard", () => {
 
   it("opens a saved role with the job description and rubric", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
@@ -518,8 +512,8 @@ describe("App dashboard", () => {
 
   it("opens Result from a recent success row and Back to dashboard returns home", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
@@ -534,8 +528,8 @@ describe("App dashboard", () => {
 
   it("returns to the dashboard from a saved role via header Back", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
@@ -549,8 +543,8 @@ describe("App dashboard", () => {
 
   it("returns to the dashboard from History opened on the dashboard", async () => {
     chromeState.reset();
-    chromeState.store.sessionToken = "tok-1";
-    chromeState.store.openaiApiKey = "sk-test";
+    chromeState.local.sessionToken = "tok-1";
+    chromeState.session.openaiApiKey = "sk-test";
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);

@@ -5,7 +5,7 @@ import { sessions, users } from "./db/schema";
 import type { Env } from "./env";
 
 const SCRYPT_KEYLEN = 64;
-const SESSION_MS = 12 * 60 * 60 * 1000;
+const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export function hashPassword(password: string): string {
   const salt = randomBytes(16);

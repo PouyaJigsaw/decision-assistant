@@ -267,6 +267,9 @@ describe("POST /v1/session", () => {
     expect(session.token).toEqual(expect.any(String));
     expect(session.token.length).toBeGreaterThan(0);
     expect(session.expiresAt).toEqual(expect.any(String));
+    const remainingMs = Date.parse(session.expiresAt) - Date.now();
+    expect(remainingMs).toBeGreaterThan(29 * 24 * 60 * 60 * 1000);
+    expect(remainingMs).toBeLessThan(31 * 24 * 60 * 60 * 1000);
 
     const me = await app.request("/v1/me", {
       headers: { authorization: `Bearer ${session.token}` },
