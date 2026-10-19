@@ -2,7 +2,9 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./app";
 import { seedUser } from "./auth";
 import { openDatabase } from "./db/client";
-import { readEnv } from "./env";
+import { loadDotenv, readEnv } from "./env";
+
+loadDotenv();
 import { createLiveJev } from "./providers/live-jev";
 import { createLiveLlm } from "./providers/live-llm";
 import { createRuntimeProviders } from "./providers/runtime-fakes";
@@ -14,12 +16,27 @@ seedUser(db, env);
 
 let jev: JevClient;
 let llm: LlmClient;
+function unusedLlm(): LlmClient {
+  return {
+    calls: 0,
+    async draftRubric() {
+      throw new Error("llm_moved_to_client");
+    },
+    async compare() {
+      throw new Error("llm_moved_to_client");
+    },
+  };
+}
+
 if (env.providers === "live") {
-  if (!env.typesafeApiKey || !env.anthropicApiKey || !env.anthropicModel) {
-    throw new Error("TYPESAFE_API_KEY, ANTHROPIC_API_KEY, and ANTHROPIC_MODEL are required when PROVIDERS is live");
+  if (!env.typesafeApiKey) {
+    throw new Error("TYPESAFE_API_KEY is required when PROVIDERS is live");
   }
-  jev = createLiveJev({ apiKey: env.typesafeApiKey });
-  llm = createLiveLlm({ apiKey: env.anthropicApiKey, model: env.anthropicModel });
+  jev = createLiveJev({ apiKey: env.typesafeApiKey, model: env.jevModel });
+  llm =
+    env.llmApiKey && env.llmModel
+      ? createLiveLlm({ apiKey: env.llmApiKey, model: env.llmModel })
+      : unusedLlm();
 } else {
   ({ jev, llm } = createRuntimeProviders());
 }

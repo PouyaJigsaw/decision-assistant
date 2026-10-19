@@ -1,23 +1,27 @@
 import {
+  compareLlmRequest,
   costFromUsage,
   countsAsUse,
   criterionSchema,
   groundExcerpt,
-  JEV_PRICE,
+  parseCompareCompletion,
+  parseDraftCompletion,
   parseJevResponse,
   preflight,
   recommend,
   scanSafety,
   toJevRequest,
-  TRIAL_SUCCESS_CAP,
   usesRemaining,
   validateRubric,
+  candidateNameFromApprovedText,
+  parseJobPosting,
   type Criterion,
 } from "@decision-assistant/domain";
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, lt } from "drizzle-orm";
 import { Hono } from "hono";
 import type { Context, Next } from "hono";
+import { cors } from "hono/cors";
 import { z } from "zod";
 import {
   bearerToken,
@@ -25,14 +29,15 @@ import {
   deleteSession,
   findSessionUser,
   findUserByEmail,
+  hashPassword,
   verifyPassword,
 } from "./auth";
 import type { AppDatabase } from "./db/client";
-import { corrections, evaluations, roles, rubricVersions, spendEvents, trialUses } from "./db/schema";
+import { corrections, evaluations, roles, rubricVersions, spendEvents, trialUses, users } from "./db/schema";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
 
-type AppVariables = { user: { id: string; email: string } };
+type AppVariables = { user: { id: string; email: string; trialSuccessCap: number | null } };
 
 export function createApp(deps: {
   db: AppDatabase;
@@ -43,16 +48,48 @@ export function createApp(deps: {
   const db = deps.db;
   const app = new Hono<{ Variables: AppVariables }>();
 
+  app.use(
+    "*",
+    cors({
+      origin: (origin) => {
+        if (origin === "http://localhost:3000" || origin === "http://127.0.0.1:3000") return origin;
+        if (origin?.startsWith("chrome-extension://")) return origin;
+        return null;
+      },
+      allowHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
+      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    }),
+  );
+
   async function requireUser(c: Context<{ Variables: AppVariables }>, next: Next) {
     const token = bearerToken(c.req.header("authorization"));
     if (!token) return c.json({ error: "unauthorized" }, 401);
     const user = findSessionUser(db, token);
     if (!user) return c.json({ error: "unauthorized" }, 401);
-    c.set("user", { id: user.id, email: user.email });
+    c.set("user", { id: user.id, email: user.email, trialSuccessCap: user.trialSuccessCap });
     await next();
   }
 
   app.get("/v1/health", (c) => c.json({ ok: true }));
+
+  app.post("/v1/users", async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const rawEmail = body && typeof body.email === "string" ? body.email : "";
+    const password = body && typeof body.password === "string" ? body.password : "";
+    const email = rawEmail.trim().toLowerCase();
+    if (!EMAIL_RE.test(email) || password.length < 8) {
+      return c.json({ error: "invalid_credentials" }, 422);
+    }
+    if (findUserByEmail(db, email)) {
+      return c.json({ error: "email_taken" }, 409);
+    }
+    const id = crypto.randomUUID();
+    db.insert(users)
+      .values({ id, email, passwordHash: hashPassword(password), createdAt: Date.now() })
+      .run();
+    const session = createSession(db, id);
+    return c.json({ token: session.token, expiresAt: new Date(session.expiresAt).toISOString() }, 201);
+  });
 
   app.post("/v1/session", async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -78,24 +115,57 @@ export function createApp(deps: {
     return c.json({
       email: user.email,
       successCount,
-      usesRemaining: usesRemaining(successCount),
-      cap: TRIAL_SUCCESS_CAP,
+      usesRemaining: usesRemaining(successCount, successCapFor(user, deps.env.trialSuccessCap)),
+      cap: successCapFor(user, deps.env.trialSuccessCap),
     });
   });
 
   app.post("/v1/roles", requireUser, async (c) => {
     const body = await c.req.json().catch(() => null);
     const title = body && typeof body.title === "string" ? body.title : "";
+    const company = body && typeof body.company === "string" ? body.company : "";
+    const summary = body && typeof body.summary === "string" ? body.summary : "";
+    const card = roleCard(title, company, summary);
     const id = crypto.randomUUID();
     db.insert(roles)
-      .values({ id, userId: c.get("user").id, title, createdAt: Date.now() })
+      .values({
+        id,
+        userId: c.get("user").id,
+        title: card.title,
+        company: card.company,
+        summary: card.summary,
+        createdAt: Date.now(),
+      })
       .run();
-    return c.json({ id, title }, 201);
+    return c.json({ id, ...card }, 201);
+  });
+
+  app.delete("/v1/roles", requireUser, (c) => {
+    const userId = c.get("user").id;
+    const owned = db.select().from(roles).where(eq(roles.userId, userId)).all();
+    for (const role of owned) {
+      db.update(evaluations)
+        .set({ roleTitle: roleCard(role.title, role.company, role.summary).title })
+        .where(and(eq(evaluations.userId, userId), eq(evaluations.roleId, role.id)))
+        .run();
+    }
+    db.delete(roles).where(eq(roles.userId, userId)).run();
+    return c.body(null, 204);
   });
 
   app.get("/v1/roles", requireUser, (c) => {
-    const rows = db.select().from(roles).where(eq(roles.userId, c.get("user").id)).all();
-    return c.json({ roles: rows.map((row) => ({ id: row.id, title: row.title })) });
+    const rows = db
+      .select()
+      .from(roles)
+      .where(eq(roles.userId, c.get("user").id))
+      .orderBy(desc(roles.createdAt))
+      .all();
+    return c.json({
+      roles: rows.map((row) => {
+        const card = roleCard(row.title, row.company, row.summary);
+        return { id: row.id, ...card };
+      }),
+    });
   });
 
   app.post("/v1/roles/:roleId/rubrics", requireUser, async (c) => {
@@ -138,15 +208,12 @@ export function createApp(deps: {
     if (!role) return c.json({ error: "role_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const notes = body && typeof body.notes === "string" ? body.notes : "";
-    let drafted;
-    try {
-      drafted = await deps.llm.draftRubric(notes);
-    } catch (err) {
-      if (err instanceof Error && err.message === "llm_failed") {
-        return c.json({ error: "llm_failed" }, 502);
-      }
-      throw err;
-    }
+    const words = notes.trim().split(/\s+/).filter(Boolean).length;
+    if (words < 150) return c.json({ error: "insufficient_notes" }, 422);
+    const completion = completionSchema.safeParse(body?.completion);
+    if (!completion.success) return c.json({ error: "llm_completion_required" }, 400);
+    const drafted = parseDraftCompletion(completion.data.text);
+    if (!drafted.ok) return c.json({ error: "llm_failed" }, 502);
     const omitted: string[] = [];
     const criteria: Criterion[] = [];
     for (const item of drafted.criteria) {
@@ -165,12 +232,18 @@ export function createApp(deps: {
     if (criteria.length === 0) {
       return c.json({ error: "invalid_rubric", reason: "empty_requirement" }, 422);
     }
+    const parsed = parseJobPosting(notes);
+    const card = roleCard(role.title, role.company || parsed.company, role.summary || parsed.summary);
+    db.update(roles)
+      .set({ notes, title: card.title, company: card.company, summary: card.summary })
+      .where(eq(roles.id, role.id))
+      .run();
     return c.json(
       {
         criteria,
         omitted,
-        usage: drafted.usage,
-        cost: costFromUsage(drafted.usage, deps.env.llmPrice),
+        usage: { inputTokens: completion.data.inputTokens, outputTokens: completion.data.outputTokens },
+        cost: { inputUsd: 0, outputUsd: 0, totalUsd: 0 },
       },
       201,
     );
@@ -184,7 +257,7 @@ export function createApp(deps: {
     const body = await c.req.json().catch(() => null);
     const parsedBody = evaluateBody.safeParse(body);
     if (!parsedBody.success) return c.json({ error: "invalid_body" }, 400);
-    const { roleId, rubricVersionId, approvedText, keepExtracts, comparisonEnabled } = parsedBody.data;
+    const { roleId, rubricVersionId, approvedText, keepExtracts, comparisonEnabled, candidateName } = parsedBody.data;
     const user = c.get("user");
     const rubric = ownedRubric(db, rubricVersionId, user.id);
     if (!rubric || rubric.roleId !== roleId) return c.json({ error: "rubric_not_found" }, 404);
@@ -202,10 +275,15 @@ export function createApp(deps: {
       .where(and(eq(evaluations.userId, user.id), eq(evaluations.idempotencyKey, idempotencyKey)))
       .get();
     const successCount = db.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
+    const cap = successCapFor(user, deps.env.trialSuccessCap);
     if (existing) {
       if (existing.bodyHash !== hash) return c.json({ error: "idempotency_conflict" }, 409);
       if (existing.status === "success" || existing.status === "refused_cap") {
-        return c.json(toEvaluationResponse(existing, usesRemaining(successCount), true));
+        const replayed = toEvaluationResponse(db, existing, usesRemaining(successCount, cap), true);
+        if (existing.status === "success" && existing.comparisonEnabled && !existing.llmModel && existing.approvedText) {
+          return c.json(withComparisonPrompt(replayed, criteria, existing.approvedText, true));
+        }
+        return c.json(replayed);
       }
       if (existing.status === "in_progress" && Date.now() - existing.updatedAt < 15_000) {
         return c.json({ error: "evaluation_in_progress" }, 409);
@@ -215,7 +293,11 @@ export function createApp(deps: {
     if (spendToday(db, user.id) >= deps.env.dailySpendCapUsd) {
       return c.json({ error: "daily_spend_cap" }, 503);
     }
-    const gate = preflight({ evaluationsEnabled: true, successCount });
+    const gate = preflight({
+      evaluationsEnabled: true,
+      successCount,
+      successCap: cap,
+    });
     if (!gate.proceed) {
       if (gate.reason === "kill_switch") return c.json({ error: "evaluations_disabled" }, 503);
       const refusedAt = Date.now();
@@ -238,7 +320,7 @@ export function createApp(deps: {
           .run();
       }
       return c.json(
-        { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
+        { error: "trial_cap", message: trialClosedMessage(cap) },
         409,
       );
     }
@@ -274,7 +356,7 @@ export function createApp(deps: {
         .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
         .where(eq(evaluations.id, id))
         .run();
-      return c.json({ error: "jev_failed", reason: jevResult.reason, id, usesRemaining: usesRemaining(successCount) }, 502);
+      return c.json({ error: "jev_failed", reason: jevResult.reason, id, usesRemaining: usesRemaining(successCount, cap) }, 502);
     }
     const parsed = parseJevResponse(criteria, jevResult.payload);
     if (!parsed.ok) {
@@ -282,43 +364,22 @@ export function createApp(deps: {
         .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
         .where(eq(evaluations.id, id))
         .run();
-      return c.json({ error: "jev_failed", reason: "invalid_jev", id, usesRemaining: usesRemaining(successCount) }, 502);
+      return c.json({ error: "jev_failed", reason: "invalid_jev", id, usesRemaining: usesRemaining(successCount, cap) }, 502);
     }
     const rec = recommend(criteria, parsed.answers);
-    let llm:
-      | {
-          model: string;
-          usage: { inputTokens: number; outputTokens: number };
-          cost: { inputUsd: number; outputUsd: number; totalUsd: number };
-          price: Env["llmPrice"];
-        }
-      | null = null;
-    let excerpts: { criterionId: string; excerpt: string }[] = [];
-    if (comparisonEnabled) {
-      try {
-        const compared = await deps.llm.compare({ approvedText, criteria });
-        excerpts = compared.excerpts;
-        const cost = costFromUsage(compared.usage, deps.env.llmPrice);
-        llm = { model: compared.model, usage: compared.usage, cost, price: deps.env.llmPrice };
-      } catch {
-        excerpts = [];
-      }
-    }
-    const excerptById = new Map(excerpts.map((item) => [item.criterionId, item.excerpt]));
-    const answers = parsed.answers.map((answer) => {
-      const raw = excerptById.get(answer.criterionId);
-      return {
-        ...answer,
-        excerpt: null,
-        llmExcerpt: raw ? groundExcerpt(approvedText, raw).excerpt : null,
-      };
-    });
-    const jevCost = costFromUsage(parsed.usage, JEV_PRICE);
+    const answers = parsed.answers.map((answer) => ({
+      ...answer,
+      excerpt: null,
+      llmResult: null,
+      llmConfidence: null,
+      llmExcerpt: null,
+    }));
+    const jevCost = costFromUsage(parsed.usage, deps.env.jevPrice);
     const used = countsAsUse({ jevValid: true, idempotencyReplay: false });
     const finishedAt = Date.now();
     const committed = db.transaction((tx) => {
       const liveCount = tx.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
-      if (liveCount >= TRIAL_SUCCESS_CAP) {
+      if (cap != null && liveCount >= cap) {
         tx.update(evaluations)
           .set({ status: "refused_cap", countsAsUse: 0, updatedAt: finishedAt })
           .where(eq(evaluations.id, id))
@@ -338,16 +399,17 @@ export function createApp(deps: {
           jevOutputTokens: parsed.usage.outputTokens,
           jevInputUsd: jevCost.inputUsd,
           jevOutputUsd: jevCost.outputUsd,
-          llmModel: llm?.model ?? null,
-          llmInputTokens: llm?.usage.inputTokens ?? null,
-          llmOutputTokens: llm?.usage.outputTokens ?? null,
-          llmInputUsdPerMillion: llm ? deps.env.llmPrice.inputUsdPerMillion : null,
-          llmOutputUsdPerMillion: llm ? deps.env.llmPrice.outputUsdPerMillion : null,
-          llmInputUsd: llm?.cost.inputUsd ?? null,
-          llmOutputUsd: llm?.cost.outputUsd ?? null,
-          approvedText: keepExtracts ? approvedText : null,
+          llmModel: null,
+          llmInputTokens: null,
+          llmOutputTokens: null,
+          llmInputUsdPerMillion: null,
+          llmOutputUsdPerMillion: null,
+          llmInputUsd: null,
+          llmOutputUsd: null,
+          approvedText: keepExtracts || comparisonEnabled ? approvedText : null,
           keepExtracts: keepExtracts ? 1 : 0,
           comparisonEnabled: comparisonEnabled ? 1 : 0,
+          candidateName: candidateName?.trim() || candidateNameFromApprovedText(approvedText),
           updatedAt: finishedAt,
         })
         .where(eq(evaluations.id, id))
@@ -357,35 +419,97 @@ export function createApp(deps: {
           .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: finishedAt })
           .run();
       }
-      return { kind: "ok" as const, remaining: usesRemaining(liveCount + (used ? 1 : 0)) };
+      return { kind: "ok" as const, remaining: usesRemaining(liveCount + (used ? 1 : 0), cap) };
     });
     if (committed.kind === "cap") {
       return c.json(
-        { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
+        { error: "trial_cap", message: trialClosedMessage(cap) },
         409,
       );
     }
     const stored = getEvaluation(db, id);
-    return c.json(toEvaluationResponse(stored!, committed.remaining, false));
+    return c.json(
+      withComparisonPrompt(
+        toEvaluationResponse(db, stored!, committed.remaining, false),
+        criteria,
+        approvedText,
+        comparisonEnabled,
+      ),
+    );
+  });
+
+  app.post("/v1/evaluations/:id/comparison", requireUser, async (c) => {
+    const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
+    if (!row) return c.json({ error: "evaluation_not_found" }, 404);
+    if (row.status !== "success") return c.json({ error: "evaluation_not_ready" }, 409);
+    if (!row.comparisonEnabled) return c.json({ error: "comparison_disabled" }, 409);
+    const body = await c.req.json().catch(() => null);
+    const completion = completionSchema.safeParse(body);
+    if (!completion.success) return c.json({ error: "llm_completion_required" }, 400);
+    const rubric = db.select().from(rubricVersions).where(eq(rubricVersions.id, row.rubricVersionId)).get();
+    const criteria = (rubric ? JSON.parse(rubric.criteriaJson) : []) as Criterion[];
+    const parsed = parseCompareCompletion(completion.data.text, criteria);
+    if (!parsed.ok) return c.json({ error: "llm_failed" }, 502);
+    const profile = row.approvedText ?? "";
+    const storedAnswers = row.answersJson ? (JSON.parse(row.answersJson) as { criterionId: string }[]) : [];
+    const byId = new Map(parsed.answers.map((item) => [item.criterionId, item]));
+    const answers = storedAnswers.map((answer) => {
+      const compared = byId.get(answer.criterionId);
+      return {
+        ...answer,
+        llmResult: compared?.result ?? null,
+        llmConfidence: compared?.confidence ?? null,
+        llmExcerpt: compared?.excerpt ? groundExcerpt(profile, compared.excerpt).excerpt : null,
+      };
+    });
+    db.update(evaluations)
+      .set({
+        answersJson: JSON.stringify(answers),
+        llmModel: completion.data.model,
+        llmInputTokens: completion.data.inputTokens,
+        llmOutputTokens: completion.data.outputTokens,
+        llmInputUsdPerMillion: null,
+        llmOutputUsdPerMillion: null,
+        llmInputUsd: null,
+        llmOutputUsd: null,
+        approvedText: row.keepExtracts ? row.approvedText : null,
+        updatedAt: Date.now(),
+      })
+      .where(eq(evaluations.id, row.id))
+      .run();
+    const viewer = c.get("user");
+    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, viewer.id)).all().length;
+    const stored = getEvaluation(db, row.id);
+    return c.json(
+      toEvaluationResponse(db, stored!, usesRemaining(successCount, successCapFor(viewer, deps.env.trialSuccessCap)), false),
+    );
   });
 
   app.get("/v1/evaluations/:id", requireUser, (c) => {
     const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
-    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, c.get("user").id)).all().length;
-    return c.json(toEvaluationResponse(row, usesRemaining(successCount), false));
+    const viewer = c.get("user");
+    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, viewer.id)).all().length;
+    return c.json(toEvaluationResponse(db, row, usesRemaining(successCount, successCapFor(viewer, deps.env.trialSuccessCap)), false));
   });
 
   app.get("/v1/evaluations", requireUser, (c) => {
-    const rows = db.select().from(evaluations).where(eq(evaluations.userId, c.get("user").id)).all();
+    const rows = db
+      .select()
+      .from(evaluations)
+      .where(eq(evaluations.userId, c.get("user").id))
+      .orderBy(desc(evaluations.createdAt))
+      .all();
     const items = rows.map((row) => {
-      const role = db.select().from(roles).where(eq(roles.id, row.roleId)).get();
       const jevTotalUsd = (row.jevInputUsd ?? 0) + (row.jevOutputUsd ?? 0);
       const llmTotalUsd = (row.llmInputUsd ?? 0) + (row.llmOutputUsd ?? 0);
       return {
         id: row.id,
+        status: row.status,
         action: row.action,
-        roleTitle: role?.title ?? "",
+        roleId: row.roleId,
+        roleTitle: evaluationRoleTitle(db, row),
+        candidateName: row.candidateName || candidateNameFromApprovedText(row.approvedText ?? ""),
         jevTotalUsd,
         llmTotalUsd,
         comparisonEnabled: Boolean(row.comparisonEnabled),
@@ -437,12 +561,27 @@ export function createApp(deps: {
   });
 
   app.delete("/v1/evaluations", requireUser, (c) => {
-    const rows = db.select().from(evaluations).where(eq(evaluations.userId, c.get("user").id)).all();
+    const roleId = c.req.query("roleId");
+    const rows = db
+      .select()
+      .from(evaluations)
+      .where(
+        roleId
+          ? and(eq(evaluations.userId, c.get("user").id), eq(evaluations.roleId, roleId))
+          : eq(evaluations.userId, c.get("user").id),
+      )
+      .all();
     archiveSpend(db, rows);
     for (const row of rows) {
       db.delete(corrections).where(eq(corrections.evaluationId, row.id)).run();
     }
-    db.delete(evaluations).where(eq(evaluations.userId, c.get("user").id)).run();
+    if (roleId) {
+      db.delete(evaluations)
+        .where(and(eq(evaluations.userId, c.get("user").id), eq(evaluations.roleId, roleId)))
+        .run();
+    } else {
+      db.delete(evaluations).where(eq(evaluations.userId, c.get("user").id)).run();
+    }
     return c.body(null, 204);
   });
 
@@ -456,14 +595,34 @@ export function createApp(deps: {
       .orderBy(desc(rubricVersions.version))
       .get();
     if (!latest) return c.json({ error: "rubric_not_found" }, 404);
+    const card = roleCard(role.title, role.company, role.summary);
     return c.json({
       id: latest.id,
       version: latest.version,
       criteria: JSON.parse(latest.criteriaJson),
+      notes: role.notes ?? "",
+      title: card.title,
+      company: card.company,
+      summary: card.summary,
     });
   });
 
   return app;
+}
+
+function successCapFor(user: { trialSuccessCap: number | null }, fallback: number | null): number | null {
+  return user.trialSuccessCap ?? fallback;
+}
+
+function trialClosedMessage(cap: number | null): string {
+  const count = cap === 3 ? "three" : String(cap);
+  return `This trial covered ${count} profiles. Evaluate is closed.`;
+}
+
+function evaluationRoleTitle(db: AppDatabase, row: { roleId: string; roleTitle: string | null }) {
+  const role = db.select().from(roles).where(eq(roles.id, row.roleId)).get();
+  if (role) return roleCard(role.title, role.company, role.summary).title;
+  return row.roleTitle ?? "";
 }
 
 function ownedRole(db: AppDatabase, roleId: string, userId: string) {
@@ -536,15 +695,24 @@ const notesBody = z.object({
   notes: z.string().max(2000),
 });
 
+const completionSchema = z.object({
+  model: z.string().min(1),
+  text: z.string().min(1),
+  inputTokens: z.number().finite().nonnegative(),
+  outputTokens: z.number().finite().nonnegative(),
+});
+
 const evaluateBody = z.object({
   roleId: z.string().min(1),
   rubricVersionId: z.string().min(1),
   approvedText: z.string().trim().min(1),
   keepExtracts: z.boolean(),
   comparisonEnabled: z.boolean().default(true),
+  candidateName: z.string().optional(),
 });
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function routeParam(c: Context<{ Variables: AppVariables }>, name: string): string {
   return c.req.param(name) ?? "";
@@ -554,12 +722,30 @@ export function getEvaluation(db: AppDatabase, id: string) {
   return db.select().from(evaluations).where(eq(evaluations.id, id)).get();
 }
 
+function withComparisonPrompt(
+  response: ReturnType<typeof toEvaluationResponse>,
+  criteria: Criterion[],
+  approvedText: string,
+  comparisonEnabled: boolean,
+) {
+  if (!comparisonEnabled) return response;
+  return { ...response, comparison: compareLlmRequest(criteria, approvedText) };
+}
+
 function toEvaluationResponse(
+  db: AppDatabase,
   row: NonNullable<ReturnType<typeof getEvaluation>>,
-  remaining: number,
+  remaining: number | null,
   replayed: boolean,
 ) {
-  const answers = row.answersJson ? JSON.parse(row.answersJson) : [];
+  const rubric = db.select().from(rubricVersions).where(eq(rubricVersions.id, row.rubricVersionId)).get();
+  const criteria = (rubric ? JSON.parse(rubric.criteriaJson) : []) as Criterion[];
+  const labels = new Map(criteria.map((item) => [item.id, item.label]));
+  const storedAnswers = row.answersJson ? JSON.parse(row.answersJson) : [];
+  const answers = storedAnswers.map((answer: { criterionId: string; label?: string }) => ({
+    ...answer,
+    label: answer.label ?? labels.get(answer.criterionId),
+  }));
   const jev =
     row.jevModel == null
       ? null
@@ -594,12 +780,35 @@ function toEvaluationResponse(
     action: row.action,
     score: row.score,
     reasonCode: row.reasonCode,
+    roleTitle: evaluationRoleTitle(db, row),
+    candidateName: row.candidateName || candidateNameFromApprovedText(row.approvedText ?? ""),
     answers,
     jev,
     llm,
     usesRemaining: remaining,
     countsAsUse: replayed ? false : Boolean(row.countsAsUse),
     replayed,
+  };
+}
+
+function isChromeTitle(title: string) {
+  return (
+    !title ||
+    /^(about the job|role)$/i.test(title) ||
+    /^(?:[A-Z][A-Za-z0-9&.]{1,40}?)(?:\s+is a|\s+is an|\s+partners)\b/.test(title)
+  );
+}
+
+function roleCard(title: string, company: string | null | undefined, summary: string | null | undefined) {
+  const stored = { title, company: company ?? "", summary: summary ?? "" };
+  const parsed = parseJobPosting([stored.title, stored.summary].filter(Boolean).join("\n"));
+  const companyName = stored.company || parsed.company;
+  const parsedTitleLooksReal = Boolean(parsed.title && !isChromeTitle(parsed.title));
+  const repaired = isChromeTitle(stored.title);
+  return {
+    title: parsedTitleLooksReal ? parsed.title : repaired ? companyName || parsed.title || "Role" : stored.title,
+    company: companyName,
+    summary: stored.summary || (repaired ? parsed.summary : ""),
   };
 }
 

@@ -1,26 +1,21 @@
-import type { Criterion } from "@decision-assistant/domain";
+import {
+  COMPARE_JSON_SCHEMA,
+  DRAFT_INSTRUCTIONS,
+  compareLlmRequest,
+  parseCompareCompletion,
+  parseDraftCompletion,
+  type Criterion,
+} from "@decision-assistant/domain";
 import type { LlmClient } from "./types";
 
-const ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
-const KINDS = new Set<Criterion["kind"]>(["requirement", "preference", "disqualifier", "seniority"]);
-
-const DRAFT_SYSTEM =
-  'Return only JSON: {"criteria":[{"kind":"requirement"|"preference"|"disqualifier"|"seniority","label":"short name","prompt":"one question"}]}. Include at least one requirement and at most one seniority. Do not include protected traits.';
-const COMPARE_SYSTEM =
-  'Return only JSON: {"answers":[{"criterionId":"id","excerpt":"a contiguous quote from the profile or an empty string"}]}. Quote only text that appears in the profile. Do not decide an action.';
+const DEFAPI_URL = "https://api.defapi.org/api/v1/messages";
+const LLM_TIMEOUT_MS = 45_000;
 
 type DraftResult = Awaited<ReturnType<LlmClient["draftRubric"]>>;
 type CompareResult = Awaited<ReturnType<LlmClient["compare"]>>;
 
 function llmFailed(): never {
   throw new Error("llm_failed");
-}
-
-function unwrapJsonText(text: string): string {
-  let s = text.trim();
-  if (s.startsWith("```json")) s = s.slice("```json".length).trimStart();
-  if (s.endsWith("```")) s = s.slice(0, -3).trimEnd();
-  return s;
 }
 
 function firstTextBlock(payload: unknown): string {
@@ -34,17 +29,6 @@ function firstTextBlock(payload: unknown): string {
     llmFailed();
   }
   return block.text;
-}
-
-function parseJsonObject(text: string): Record<string, unknown> {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(unwrapJsonText(text));
-  } catch {
-    llmFailed();
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) llmFailed();
-  return parsed as Record<string, unknown>;
 }
 
 function usageAndModel(payload: unknown): { model: string; usage: { inputTokens: number; outputTokens: number } } {
@@ -61,66 +45,53 @@ function usageAndModel(payload: unknown): { model: string; usage: { inputTokens:
 }
 
 function parseDraft(payload: unknown): DraftResult {
-  const parsed = parseJsonObject(firstTextBlock(payload));
-  const criteria = parsed.criteria;
-  if (!Array.isArray(criteria)) llmFailed();
-  const mapped = criteria.map((item) => {
-    if (typeof item !== "object" || item === null) llmFailed();
-    const row = item as { kind?: unknown; label?: unknown; prompt?: unknown };
-    if (typeof row.kind !== "string" || !KINDS.has(row.kind as Criterion["kind"])) llmFailed();
-    if (typeof row.label !== "string" || typeof row.prompt !== "string") llmFailed();
-    return { kind: row.kind as Criterion["kind"], label: row.label, prompt: row.prompt };
-  });
+  const parsed = parseDraftCompletion(firstTextBlock(payload));
+  if (!parsed.ok) llmFailed();
   const meta = usageAndModel(payload);
-  return { model: meta.model, criteria: mapped, usage: meta.usage };
+  return { model: meta.model, criteria: parsed.criteria, usage: meta.usage };
 }
 
-function parseCompare(payload: unknown): CompareResult {
-  const parsed = parseJsonObject(firstTextBlock(payload));
-  const answers = parsed.answers;
-  if (!Array.isArray(answers)) llmFailed();
-  const excerpts = answers.map((item) => {
-    if (typeof item !== "object" || item === null) llmFailed();
-    const row = item as { criterionId?: unknown; excerpt?: unknown };
-    if (typeof row.criterionId !== "string" || typeof row.excerpt !== "string") llmFailed();
-    return { criterionId: row.criterionId, excerpt: row.excerpt };
-  });
+function parseCompare(payload: unknown, criteria: Criterion[]): CompareResult {
+  const parsed = parseCompareCompletion(firstTextBlock(payload), criteria);
+  if (!parsed.ok) llmFailed();
   const meta = usageAndModel(payload);
-  return { model: meta.model, excerpts, usage: meta.usage };
-}
-
-function compareUserContent(input: { approvedText: string; criteria: Criterion[] }): string {
-  const lines = input.criteria.map((c) => `${c.id} [${c.kind}] ${c.prompt}`);
-  return `Profile:\n${input.approvedText}\n\nCriteria:\n${lines.join("\n")}`;
+  return { model: meta.model, answers: parsed.answers, usage: meta.usage };
 }
 
 export function createLiveLlm(opts: { apiKey: string; model: string; fetchImpl?: typeof fetch }): LlmClient {
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  async function complete(system: string, user: string): Promise<unknown> {
+  async function complete(system: string, user: string, extra: Record<string, unknown> = {}): Promise<unknown> {
     try {
-      const response = await fetchImpl(ANTHROPIC_URL, {
+      const response = await fetchImpl(DEFAPI_URL, {
         method: "POST",
         headers: {
-          "x-api-key": opts.apiKey,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${opts.apiKey}`,
         },
         body: JSON.stringify({
           model: opts.model,
-          max_tokens: 2000,
           system,
           messages: [{ role: "user", content: user }],
+          ...extra,
         }),
-        signal: AbortSignal.timeout(10_000),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       });
-      if (!response.ok) llmFailed();
+      if (!response.ok) {
+        console.error("live-llm failed", { reason: "http", status: response.status });
+        llmFailed();
+      }
       try {
         return JSON.parse(await response.text()) as unknown;
       } catch {
+        console.error("live-llm failed", { reason: "invalid_json" });
         llmFailed();
       }
-    } catch {
+    } catch (error) {
+      const name = error instanceof Error ? error.name : "Error";
+      const reason = name === "TimeoutError" || name === "AbortError" ? "timeout" : "transport";
+      console.error("live-llm failed", { reason });
       llmFailed();
     }
   }
@@ -129,11 +100,18 @@ export function createLiveLlm(opts: { apiKey: string; model: string; fetchImpl?:
     calls: 0,
     async draftRubric(notes) {
       this.calls += 1;
-      return parseDraft(await complete(DRAFT_SYSTEM, notes));
+      const request = { instructions: DRAFT_INSTRUCTIONS, input: notes };
+      return parseDraft(await complete(request.instructions, request.input));
     },
     async compare(input) {
       this.calls += 1;
-      return parseCompare(await complete(COMPARE_SYSTEM, compareUserContent(input)));
+      const request = compareLlmRequest(input.criteria, input.approvedText);
+      return parseCompare(
+        await complete(request.instructions, request.input, {
+          output_config: { format: { type: "json_schema", schema: COMPARE_JSON_SCHEMA } },
+        }),
+        input.criteria,
+      );
     },
   };
 }

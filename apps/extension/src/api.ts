@@ -56,16 +56,47 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
       await tokenStore.set(data.token);
       return data;
     },
+    async signup(email: string, password: string) {
+      const data = await request("/v1/users", {
+        method: "POST",
+        body: JSON.stringify({ email, password }),
+      });
+      await tokenStore.set(data.token);
+      return data;
+    },
     async me() {
       return request("/v1/me");
     },
-    async createRole(title: string) {
-      return request("/v1/roles", { method: "POST", body: JSON.stringify({ title }) });
+    async logout() {
+      try {
+        await request("/v1/session", { method: "DELETE" });
+      } finally {
+        await tokenStore.clear();
+      }
     },
-    async draftRubric(roleId: string, notes: string) {
+    async listRoles() {
+      return request("/v1/roles");
+    },
+    async deleteRoles() {
+      return request("/v1/roles", { method: "DELETE" });
+    },
+    async getCurrentRubric(roleId: string) {
+      return request(`/v1/roles/${roleId}/rubrics/current`);
+    },
+    async createRole(title: string, extras: { company?: string; summary?: string } = {}) {
+      return request("/v1/roles", {
+        method: "POST",
+        body: JSON.stringify({ title, company: extras.company ?? "", summary: extras.summary ?? "" }),
+      });
+    },
+    async draftRubric(
+      roleId: string,
+      notes: string,
+      completion: { model: string; text: string; inputTokens: number; outputTokens: number },
+    ) {
       return request(`/v1/roles/${roleId}/rubric-drafts`, {
         method: "POST",
-        body: JSON.stringify({ notes }),
+        body: JSON.stringify({ notes, completion }),
       });
     },
     async approveRubric(roleId: string, criteria: unknown[]) {
@@ -80,6 +111,7 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
       approvedText: string;
       keepExtracts: boolean;
       comparisonEnabled: boolean;
+      candidateName?: string;
       idempotencyKey?: string;
     }) {
       const headers = new Headers();
@@ -93,7 +125,17 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
           approvedText: body.approvedText,
           keepExtracts: body.keepExtracts,
           comparisonEnabled: body.comparisonEnabled,
+          candidateName: body.candidateName,
         }),
+      });
+    },
+    async postComparison(
+      id: string,
+      completion: { model: string; text: string; inputTokens: number; outputTokens: number },
+    ) {
+      return request(`/v1/evaluations/${id}/comparison`, {
+        method: "POST",
+        body: JSON.stringify(completion),
       });
     },
     async correct(id: string, action: string) {
@@ -108,11 +150,15 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
         body: JSON.stringify({ notes }),
       });
     },
+    async getEvaluation(id: string) {
+      return request(`/v1/evaluations/${id}`);
+    },
     async listEvaluations() {
       return request("/v1/evaluations");
     },
-    async deleteEvaluations() {
-      return request("/v1/evaluations", { method: "DELETE" });
+    async deleteEvaluations(roleId?: string) {
+      const path = roleId ? `/v1/evaluations?roleId=${encodeURIComponent(roleId)}` : "/v1/evaluations";
+      return request(path, { method: "DELETE" });
     },
   };
 }

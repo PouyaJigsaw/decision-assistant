@@ -3,9 +3,11 @@ import { sampleRubric } from "@decision-assistant/domain";
 import { createApp } from "../src/app";
 import { seedUser } from "../src/auth";
 import { openDatabase } from "../src/db/client";
-import { readEnv } from "../src/env";
+import { loadDotenv, readEnv } from "../src/env";
+
+loadDotenv();
 import { createLiveJev } from "../src/providers/live-jev";
-import { createLiveLlm } from "../src/providers/live-llm";
+import type { LlmClient } from "../src/providers/types";
 
 const APPROVED_TEXT =
   "Staff engineer, payments. Led the payments API in Go for four years and owned production incidents.";
@@ -16,8 +18,16 @@ mkdirSync("data", { recursive: true });
 const db = openDatabase("data/decision-assistant.db");
 seedUser(db, env);
 
-const jev = createLiveJev({ apiKey: env.typesafeApiKey });
-const llm = createLiveLlm({ apiKey: env.anthropicApiKey, model: env.anthropicModel });
+const jev = createLiveJev({ apiKey: env.typesafeApiKey, model: env.jevModel });
+const llm: LlmClient = {
+  calls: 0,
+  async draftRubric() {
+    throw new Error("llm_moved_to_client");
+  },
+  async compare() {
+    throw new Error("llm_moved_to_client");
+  },
+};
 const app = createApp({ db, jev, llm, env });
 
 const jsonHeaders = { "content-type": "application/json" };
@@ -97,7 +107,7 @@ async function main() {
       rubricVersionId: rubric.id,
       approvedText: APPROVED_TEXT,
       keepExtracts: false,
-      comparisonEnabled: true,
+      comparisonEnabled: false,
     }),
   });
   const evaluatedBody = (await readBody(evaluated)) as {
@@ -106,7 +116,7 @@ async function main() {
     score?: unknown;
     jev?: unknown;
     llm?: unknown;
-    answers?: { criterionId: string; llmExcerpt: string | null }[];
+    answers?: { criterionId: string; llmResult?: string | null; llmExcerpt: string | null }[];
   };
 
   if (evaluated.status !== 200 || evaluatedBody.status !== "success") {
@@ -121,6 +131,7 @@ async function main() {
       llm: evaluatedBody.llm,
       answers: (evaluatedBody.answers ?? []).map((answer) => ({
         criterionId: answer.criterionId,
+        llmResult: answer.llmResult,
         llmExcerpt: answer.llmExcerpt,
       })),
     }),

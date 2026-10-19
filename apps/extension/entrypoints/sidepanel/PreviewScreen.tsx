@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { PRODUCT_NAME } from "../../src/copy";
 import { approvedText } from "../../src/payload";
 import { PanelHeader } from "./PanelHeader";
 
@@ -10,6 +11,11 @@ export function PreviewScreen({
   sections,
   api,
   onEvaluated,
+  onRecapture,
+  onChangeJob,
+  captureError,
+  billing,
+  onBack,
 }: {
   url: string;
   roleTitle: string;
@@ -22,11 +28,20 @@ export function PreviewScreen({
     }) => Promise<unknown>;
   };
   onEvaluated: () => void;
+  onRecapture?: () => void;
+  onChangeJob?: () => void;
+  captureError?: string;
+  billing?: string;
+  onBack?: () => void;
 }) {
   const [removed, setRemoved] = useState<Record<string, boolean>>({});
   const [comparisonEnabled, setComparisonEnabled] = useState(true);
   const [keepExtracts, setKeepExtracts] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setRemoved({});
+  }, [url, sections]);
 
   const preview = sections.map((section) => ({
     ...section,
@@ -49,7 +64,7 @@ export function PreviewScreen({
 
   return (
     <section className="panel">
-      <PanelHeader title="Decision Assistant" subtitle={roleTitle} />
+      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} onBack={onBack} />
       <div>
         <h2>Preview the extract</h2>
         <p className="lede">Nothing is uploaded until you confirm.</p>
@@ -58,6 +73,24 @@ export function PreviewScreen({
           messaged to the candidate.
         </p>
         <p className="url">{url}</p>
+        {onRecapture || onChangeJob ? (
+          <div className="stack">
+            {onRecapture ? (
+              <>
+                <p className="lede">Focus the page you want, then read that tab.</p>
+                <button className="secondary" type="button" onClick={onRecapture}>
+                  Read this tab
+                </button>
+              </>
+            ) : null}
+            {onChangeJob ? (
+              <button className="secondary" type="button" onClick={onChangeJob}>
+                Change job description
+              </button>
+            ) : null}
+            {captureError ? <p className="error">{captureError}</p> : null}
+          </div>
+        ) : null}
       </div>
       <div className="stack">
         {preview
@@ -83,6 +116,7 @@ export function PreviewScreen({
         Also run direct LLM
       </label>
       <p className="lede">Same questions, so the token comparison is fair.</p>
+      {billing ? <p className="lede">{billing}</p> : null}
       <label className="check">
         <input type="checkbox" checked={keepExtracts} onChange={(event) => setKeepExtracts(event.target.checked)} />
         Keep extracts on the server

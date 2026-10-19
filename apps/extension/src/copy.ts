@@ -1,4 +1,6 @@
-import type { ReasonCode } from "@decision-assistant/domain";
+import { CONFIDENCE_THRESHOLD, type ReasonCode } from "@decision-assistant/domain";
+
+export const PRODUCT_NAME = "Who Fits?";
 
 const REASONS: Record<ReasonCode, string> = {
   missing_evidence: "A required qualification cannot be confirmed. Missing evidence is not treated as a mismatch.",
@@ -25,6 +27,51 @@ export function reasonCopy(reasonCode: ReasonCode): string {
   return REASONS[reasonCode];
 }
 
+export function resultLabel(result: string): string {
+  return RESULTS[result] ?? result;
+}
+
+export function certaintyCopy(confidence: number): string {
+  const value = Math.min(1, Math.max(0, confidence)).toFixed(2);
+  return confidence >= CONFIDENCE_THRESHOLD
+    ? `Certain of this call · ${value}`
+    : `Unsure of this call · ${value}`;
+}
+
+export function chipTone(result: string): "match" | "mismatch" | "no_evidence" {
+  if (result === "match" || result === "aligned" || result === "above") return "match";
+  if (result === "mismatch" || result === "below") return "mismatch";
+  return "no_evidence";
+}
+
+export function resultMark(result: string): string {
+  const tone = chipTone(result);
+  if (tone === "match") return "✓";
+  if (tone === "mismatch") return "×";
+  return "–";
+}
+
+export function isCertain(confidence: number): boolean {
+  return confidence >= CONFIDENCE_THRESHOLD;
+}
+
+export function isConfirmedMatch(result: string, confidence: number): boolean {
+  return isCertain(confidence) && chipTone(result) === "match";
+}
+
 export function chipLabel(result: string, confidence: number): string {
-  return `${RESULTS[result] ?? result} · ${confidence.toFixed(2)}`;
+  return `${resultLabel(result)} · ${confidence.toFixed(2)}`;
+}
+
+export function usesRemainingCopy(usesRemaining: number | null, cap: number | null = 3): string {
+  if (usesRemaining == null || cap == null) return "Uses remaining: unlimited";
+  return `Uses remaining: ${usesRemaining} of ${cap}`;
+}
+
+export function evaluatedForCopy(roleTitle?: string, candidateName?: string): string {
+  const role = roleTitle?.trim();
+  const name = candidateName?.trim();
+  if (name && role) return `${name} · evaluated for ${role}`;
+  if (role) return `Evaluated for ${role}`;
+  return name ?? "";
 }

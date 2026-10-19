@@ -1,14 +1,47 @@
 import { sampleRubric } from "@decision-assistant/domain";
+import { eq } from "drizzle-orm";
 import type { Hono } from "hono";
 import { describe, expect, it } from "vitest";
 import { getEvaluation } from "./app";
 import { createTestApp, signIn } from "./app.test-helpers";
-import { evaluations, trialUses, users } from "./db/schema";
+import { evaluations, roles, trialUses, users } from "./db/schema";
 import { FakeJev } from "./providers/fake-jev";
 import { FakeLlm } from "./providers/fake-llm";
 import { createRuntimeProviders } from "./providers/runtime-fakes";
 
 const APPROVED_TEXT = "Staff engineer. Led the payments API in Go for four years.";
+
+function enoughNotes() {
+  return Array.from({ length: 150 }, (_, index) => `requirement${index}`).join(" ");
+}
+
+const DRAFT_COMPLETION_TEXT = JSON.stringify({
+  criteria: [
+    { kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" },
+    { kind: "preference", label: "Team", prompt: "Does the candidate mention cultural fit?" },
+    {
+      kind: "disqualifier",
+      label: "No ownership",
+      prompt: "Has the candidate never owned production systems?",
+    },
+    { kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
+  ],
+});
+
+function draftCompletion(text = DRAFT_COMPLETION_TEXT) {
+  return { model: "gpt-5.4", text, inputTokens: 1842, outputTokens: 610 };
+}
+
+const COMPARE_COMPLETION_TEXT = JSON.stringify({
+  answers: [
+    { criterionId: "go", result: "match", confidence: 0.91, excerpt: "Led the payments API in Go for four years." },
+    { criterionId: "distributed", result: "no_evidence", confidence: 0.8, excerpt: "not in the profile" },
+  ],
+});
+
+function compareCompletion(text = COMPARE_COMPLETION_TEXT) {
+  return { model: "gpt-5.4", text, inputTokens: 412, outputTokens: 88 };
+}
 
 const contactJevPayload = {
   model: "jev-1.13.0",
@@ -48,9 +81,9 @@ function contactProviders() {
       compare() {
         return {
           model: "fake-llm",
-          excerpts: [
-            { criterionId: "go", excerpt: "Led the payments API in Go for four years." },
-            { criterionId: "distributed", excerpt: "not in the profile" },
+          answers: [
+            { criterionId: "go", result: "match", confidence: 0.91, excerpt: "Led the payments API in Go for four years." },
+            { criterionId: "distributed", result: "no_evidence", confidence: 0.8, excerpt: "not in the profile" },
           ],
           usage: { inputTokens: 412, outputTokens: 88 },
         };
@@ -112,6 +145,106 @@ describe("GET /v1/health", () => {
   });
 });
 
+describe("CORS for the WXT side panel", () => {
+  it("answers a preflight from the Vite origin and does not reflect unknown origins", async () => {
+    const { app } = createTestApp();
+    const preflight = await app.request("/v1/session", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "http://localhost:3000",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type",
+      },
+    });
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+    expect(preflight.headers.get("access-control-allow-headers")?.toLowerCase()).toContain("content-type");
+
+    const denied = await app.request("/v1/session", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.example",
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    expect(denied.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+describe("POST /v1/users", () => {
+  it("creates an account, returns a session, and leaves three uses", async () => {
+    const { app, jev, llm } = createTestApp();
+    const created = await app.request("/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "  New.User@Example.com ", password: "long-enough" }),
+    });
+    expect(created.status).toBe(201);
+    const session = await created.json();
+    expect(session.token).toEqual(expect.any(String));
+    expect(session.token.length).toBeGreaterThan(0);
+    expect(session.expiresAt).toEqual(expect.any(String));
+    expect(jev.calls).toBe(0);
+    expect(llm.calls).toBe(0);
+
+    const me = await app.request("/v1/me", {
+      headers: { authorization: `Bearer ${session.token}` },
+    });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toEqual({
+      email: "new.user@example.com",
+      successCount: 0,
+      usesRemaining: 3,
+      cap: 3,
+    });
+  });
+
+  it("rejects a duplicate email without inserting another user", async () => {
+    const { app, db } = createTestApp();
+    const first = await app.request("/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "taken@example.com", password: "long-enough" }),
+    });
+    expect(first.status).toBe(201);
+    const before = db.select().from(users).all().length;
+
+    const duplicate = await app.request("/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "Taken@example.com", password: "another-password" }),
+    });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toEqual({ error: "email_taken" });
+    expect(db.select().from(users).all()).toHaveLength(before);
+  });
+
+  it("rejects a short password or missing email before calling providers", async () => {
+    const { app, db, jev, llm } = createTestApp();
+    const before = db.select().from(users).all().length;
+
+    const shortPassword = await app.request("/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: "ok@example.com", password: "short" }),
+    });
+    expect(shortPassword.status).toBe(422);
+    expect(await shortPassword.json()).toEqual({ error: "invalid_credentials" });
+
+    const missingEmail = await app.request("/v1/users", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ password: "long-enough" }),
+    });
+    expect(missingEmail.status).toBe(422);
+    expect(await missingEmail.json()).toEqual({ error: "invalid_credentials" });
+
+    expect(db.select().from(users).all()).toHaveLength(before);
+    expect(jev.calls).toBe(0);
+    expect(llm.calls).toBe(0);
+  });
+});
+
 describe("POST /v1/session", () => {
   it("rejects a wrong password and signs in the seeded account", async () => {
     const { app } = createTestApp();
@@ -152,6 +285,160 @@ describe("POST /v1/session", () => {
   });
 });
 
+describe("GET /v1/roles", () => {
+  it("returns the user's roles newest first", async () => {
+    const { app, db } = createTestApp();
+    const { headers } = await signIn(app);
+    const user = db.select().from(users).all()[0];
+    db.insert(roles)
+      .values([
+        { id: "role-old", userId: user.id, title: "Older role", createdAt: 1_000 },
+        { id: "role-new", userId: user.id, title: "Newer role", createdAt: 2_000 },
+      ])
+      .run();
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({
+      roles: [
+        { id: "role-new", title: "Newer role", company: "", summary: "" },
+        { id: "role-old", title: "Older role", company: "", summary: "" },
+      ],
+    });
+  });
+
+  it("repairs an About the job title from the stored summary", async () => {
+    const { app, db } = createTestApp();
+    const { headers } = await signIn(app);
+    const user = db.select().from(users).all()[0];
+    db.insert(roles)
+      .values({
+        id: "role-about",
+        userId: user.id,
+        title: "About the job",
+        company: "",
+        summary:
+          "PCT partners with venture-backed technology companies looking for Forward Deployed Engineers (FDEs) who can bridge the gap.",
+        createdAt: 3_000,
+      })
+      .run();
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toEqual({
+      roles: [
+        {
+          id: "role-about",
+          title: "Forward Deployed Engineers",
+          company: "PCT",
+          summary: expect.stringContaining("venture-backed"),
+        },
+      ],
+    });
+  });
+
+  it("repairs an AIM lead sentence into company plus summary", async () => {
+    const { app, db } = createTestApp();
+    const { headers } = await signIn(app);
+    const user = db.select().from(users).all()[0];
+    db.insert(roles)
+      .values({
+        id: "role-aim",
+        userId: user.id,
+        title: "AIM is a deep-tech startup building advanced high-power laser systems",
+        company: "",
+        summary: "",
+        createdAt: 4_000,
+      })
+      .run();
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toEqual({
+      roles: [
+        {
+          id: "role-aim",
+          title: "AIM",
+          company: "AIM",
+          summary: expect.stringContaining("deep-tech startup"),
+        },
+      ],
+    });
+  });
+
+  it("stores and returns company and summary", async () => {
+    const { app } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        title: "Forward Deployed Engineer",
+        company: "AIM",
+        summary: "AIM is a deep-tech startup building evaluation systems.",
+      }),
+    });
+    expect(created.status).toBe(201);
+    expect(await created.json()).toEqual({
+      id: expect.any(String),
+      title: "Forward Deployed Engineer",
+      company: "AIM",
+      summary: "AIM is a deep-tech startup building evaluation systems.",
+    });
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toEqual({
+      roles: [
+        {
+          id: expect.any(String),
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+          summary: "AIM is a deep-tech startup building evaluation systems.",
+        },
+      ],
+    });
+  });
+});
+
+describe("DELETE /v1/roles", () => {
+  it("deletes every saved role and keeps evaluation history readable", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "16161616-1616-4161-8161-161616161616" },
+      body: JSON.stringify(
+        evaluateBody(role.id, rubric.id, {
+          approvedText: "Headline\nTim Glaser — CEO at TypeSafe\n\nAbout\nLed the payments API in Go for four years.",
+        }),
+      ),
+    });
+    const created = await evaluated.json();
+    db.insert(roles)
+      .values({ id: "other-role", userId: "someone-else", title: "Other role", createdAt: 1 })
+      .run();
+
+    const removed = await app.request("/v1/roles", { method: "DELETE", headers });
+    expect(removed.status).toBe(204);
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toEqual({ roles: [] });
+    expect(db.select().from(roles).all().map((row) => row.id)).toEqual(["other-role"]);
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(await history.json()).toMatchObject({
+      evaluations: [{ id: created.id, roleTitle: "Senior backend engineer", candidateName: "Tim Glaser" }],
+    });
+
+    const got = await app.request(`/v1/evaluations/${created.id}`, { headers });
+    const body = await got.json();
+    expect(body.roleTitle).toBe("Senior backend engineer");
+    expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.label).toBe(
+      "Go, five or more years",
+    );
+  });
+});
+
 describe("roles and rubrics", () => {
   it("versions an approved rubric and rejects a protected prompt", async () => {
     const { app } = createTestApp();
@@ -164,7 +451,12 @@ describe("roles and rubrics", () => {
     });
     expect(created.status).toBe(201);
     const role = await created.json();
-    expect(role).toEqual({ id: expect.any(String), title: "Senior backend engineer" });
+    expect(role).toEqual({
+      id: expect.any(String),
+      title: "Senior backend engineer",
+      company: "",
+      summary: "",
+    });
 
     const first = await app.request(`/v1/roles/${role.id}/rubrics`, {
       method: "POST",
@@ -218,29 +510,43 @@ describe("roles and rubrics", () => {
     expect(current.status).toBe(200);
     expect(await current.json()).toMatchObject({ version: 2, criteria: v2.criteria });
   });
+
+  it("returns stored job notes with the current rubric", async () => {
+    const notes = enoughNotes();
+    const { app } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    const role = await created.json();
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes, completion: draftCompletion() }),
+    });
+    expect(draft.status).toBe(201);
+    await app.request(`/v1/roles/${role.id}/rubrics`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ criteria: sampleRubric }),
+    });
+
+    const current = await app.request(`/v1/roles/${role.id}/rubrics/current`, { headers });
+    expect(current.status).toBe(200);
+    expect(await current.json()).toMatchObject({
+      version: 1,
+      criteria: sampleRubric,
+      notes,
+      title: "Senior backend engineer",
+    });
+  });
 });
 
 describe("POST /v1/roles/:roleId/rubric-drafts", () => {
   it("omits protected draft criteria and does not spend a trial use", async () => {
-    const llm = new FakeLlm({
-      draftRubric() {
-        return {
-          model: "fake-llm",
-          criteria: [
-            { kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" },
-            { kind: "preference", label: "Team", prompt: "Does the candidate mention cultural fit?" },
-            {
-              kind: "disqualifier",
-              label: "No ownership",
-              prompt: "Has the candidate never owned production systems?",
-            },
-            { kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
-          ],
-          usage: { inputTokens: 1842, outputTokens: 610 },
-        };
-      },
-    });
-    const { app, db } = createTestApp({ llm });
+    const { app, db, llm } = createTestApp();
     const { headers } = await signIn(app);
     const created = await app.request("/v1/roles", {
       method: "POST",
@@ -252,7 +558,7 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
     const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ notes: "Need Go, ownership, and senior scope." }),
+      body: JSON.stringify({ notes: enoughNotes(), completion: draftCompletion() }),
     });
     expect(draft.status).toBe(201);
     expect(await draft.json()).toEqual({
@@ -268,21 +574,56 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
       ],
       omitted: ["cultural fit"],
       usage: { inputTokens: 1842, outputTokens: 610 },
-      cost: { inputUsd: 0.005526, outputUsd: 0.00915, totalUsd: 0.014676 },
+      cost: { inputUsd: 0, outputUsd: 0, totalUsd: 0 },
     });
+    expect(llm.calls).toBe(0);
 
     expect(db.select().from(trialUses).all()).toEqual([]);
     const me = await app.request("/v1/me", { headers });
     expect(await me.json()).toMatchObject({ successCount: 0, usesRemaining: 3 });
   });
 
-  it("returns 502 llm_failed when the live draft throws", async () => {
-    const llm = new FakeLlm({
-      draftRubric() {
-        throw new Error("llm_failed");
-      },
+  it("rejects a draft without a client completion", async () => {
+    const { app, llm } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
     });
-    const { app } = createTestApp({ llm });
+    const role = await created.json();
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: enoughNotes() }),
+    });
+    expect(draft.status).toBe(400);
+    expect(await draft.json()).toEqual({ error: "llm_completion_required" });
+    expect(llm.calls).toBe(0);
+  });
+
+  it("returns 502 llm_failed when the completion is not valid JSON", async () => {
+    const { app, llm } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Senior backend engineer" }),
+    });
+    const role = await created.json();
+
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: enoughNotes(), completion: draftCompletion("not json") }),
+    });
+    expect(draft.status).toBe(502);
+    expect(await draft.json()).toEqual({ error: "llm_failed" });
+    expect(llm.calls).toBe(0);
+  });
+
+  it("rejects a short job description before calling the model", async () => {
+    const { app, llm } = createTestApp();
     const { headers } = await signIn(app);
     const created = await app.request("/v1/roles", {
       method: "POST",
@@ -296,8 +637,9 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
       headers,
       body: JSON.stringify({ notes: "Need Go." }),
     });
-    expect(draft.status).toBe(502);
-    expect(await draft.json()).toEqual({ error: "llm_failed" });
+    expect(draft.status).toBe(422);
+    expect(await draft.json()).toEqual({ error: "insufficient_notes" });
+    expect(llm.calls).toBe(0);
   });
 });
 
@@ -328,18 +670,60 @@ describe("POST /v1/evaluations", () => {
         expect.objectContaining({
           criterionId: "go",
           excerpt: null,
-          llmExcerpt: "Led the payments API in Go for four years.",
-        }),
-        expect.objectContaining({
-          criterionId: "distributed",
-          excerpt: null,
+          llmResult: null,
           llmExcerpt: null,
         }),
       ]),
     );
+    expect(body.comparison).toMatchObject({
+      instructions: expect.stringContaining("Return only JSON"),
+      input: expect.stringContaining(APPROVED_TEXT),
+    });
     expect(jev.calls).toBe(1);
-    expect(llm.calls).toBe(1);
+    expect(llm.calls).toBe(0);
     expect(db.select().from(evaluations).get()?.approvedText).toBe(APPROVED_TEXT);
+  });
+
+  it("stores a client comparison, grounds excerpts, and leaves LLM dollars null", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "11111111-1111-4111-8111-111111111111" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const created = await evaluated.json();
+    const compared = await app.request(`/v1/evaluations/${created.id}/comparison`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(compareCompletion()),
+    });
+    expect(compared.status).toBe(200);
+    const body = await compared.json();
+    expect(body.answers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          criterionId: "go",
+          llmResult: "match",
+          llmConfidence: 0.91,
+          llmExcerpt: "Led the payments API in Go for four years.",
+        }),
+        expect.objectContaining({
+          criterionId: "distributed",
+          llmResult: "no_evidence",
+          llmConfidence: 0.8,
+          llmExcerpt: null,
+        }),
+      ]),
+    );
+    expect(body.llm).toMatchObject({
+      model: "gpt-5.4",
+      usage: { inputTokens: 412, outputTokens: 88 },
+      cost: { inputUsd: null, outputUsd: null, totalUsd: 0 },
+    });
+    expect(llm.calls).toBe(0);
   });
 
   it("rejects a jev-latest payload as invalid_jev without calling compare", async () => {
@@ -349,7 +733,7 @@ describe("POST /v1/evaluations", () => {
       compare() {
         return {
           model: "fake-llm",
-          excerpts: [{ criterionId: "go", excerpt: "Led the payments API in Go for four years." }],
+          answers: [{ criterionId: "go", result: "match", confidence: 0.9, excerpt: "Led the payments API in Go for four years." }],
           usage: { inputTokens: 1, outputTokens: 1 },
         };
       },
@@ -373,21 +757,7 @@ describe("POST /v1/evaluations", () => {
 
   it("grounds an excerpt that is not in the approved text to null and still counts the use", async () => {
     const jev = new FakeJev(() => ({ ok: true, model: "jev-1.13.0", payload: contactJevPayload }));
-    const llm = new FakeLlm({
-      compare() {
-        return {
-          model: "fake-llm",
-          excerpts: [
-            { criterionId: "go", excerpt: "Python for ten years" },
-            { criterionId: "distributed", excerpt: "Python for ten years" },
-            { criterionId: "no-ownership", excerpt: "Python for ten years" },
-            { criterionId: "seniority", excerpt: "Python for ten years" },
-          ],
-          usage: { inputTokens: 412, outputTokens: 88 },
-        };
-      },
-    });
-    const { app } = createTestApp({ jev, llm });
+    const { app } = createTestApp({ jev });
     const { headers } = await signIn(app);
     const { role, rubric } = await approveRubric(app, headers);
     const res = await app.request("/v1/evaluations", {
@@ -396,11 +766,28 @@ describe("POST /v1/evaluations", () => {
       body: JSON.stringify(evaluateBody(role.id, rubric.id)),
     });
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body).toMatchObject({
+    const created = await res.json();
+    expect(created).toMatchObject({
       countsAsUse: true,
       usesRemaining: 2,
     });
+    const compared = await app.request(`/v1/evaluations/${created.id}/comparison`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(
+        compareCompletion(
+          JSON.stringify({
+            answers: ["go", "distributed", "no-ownership", "seniority"].map((criterionId) => ({
+              criterionId,
+              result: criterionId === "seniority" ? "aligned" : "match",
+              confidence: 0.9,
+              excerpt: "Python for ten years",
+            })),
+          }),
+        ),
+      ),
+    });
+    const body = await compared.json();
     expect(body.answers).toEqual(
       expect.arrayContaining(
         ["go", "distributed", "no-ownership", "seniority"].map((criterionId) =>
@@ -480,6 +867,13 @@ describe("POST /v1/evaluations", () => {
     expect(evaluated.status).toBe(200);
     const body = await evaluated.json();
     expect(body.action).toBe("contact");
+    expect(getEvaluation(db, body.id)?.approvedText).toBe(APPROVED_TEXT);
+    const compared = await app.request(`/v1/evaluations/${body.id}/comparison`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(compareCompletion()),
+    });
+    expect(compared.status).toBe(200);
     const row = getEvaluation(db, body.id);
     expect(row?.approvedText).toBeNull();
     expect(row?.action).toBe("contact");
@@ -496,6 +890,11 @@ describe("POST /v1/evaluations", () => {
       body: JSON.stringify(evaluateBody(role.id, rubric.id)),
     });
     const created = await evaluated.json();
+    await first.app.request(`/v1/evaluations/${created.id}/comparison`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(compareCompletion()),
+    });
 
     const reread = createTestApp({
       db: first.db,
@@ -508,8 +907,9 @@ describe("POST /v1/evaluations", () => {
       id: created.id,
       replayed: false,
       llm: {
-        price: { inputUsdPerMillion: 3, outputUsdPerMillion: 15 },
-        cost: { inputUsd: 0.001236, outputUsd: 0.00132, totalUsd: 0.002556 },
+        model: "gpt-5.4",
+        price: { inputUsdPerMillion: null, outputUsdPerMillion: null },
+        cost: { inputUsd: null, outputUsd: null, totalUsd: 0 },
       },
     });
   });
@@ -635,6 +1035,53 @@ describe("POST /v1/evaluations", () => {
     expect(jev.calls).toBe(3);
   });
 
+  it("lets a user with a stored cap of 100 evaluate after three successes", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const user = db.select().from(users).where(eq(users.email, "recruiter@example.com")).get();
+    expect(user).toBeTruthy();
+    db.update(users).set({ trialSuccessCap: 100 }).where(eq(users.id, user!.id)).run();
+    for (let index = 0; index < 3; index += 1) {
+      db.insert(trialUses)
+        .values({ id: `use-${index}`, userId: user!.id, evaluationId: `eval-${index}`, createdAt: index })
+        .run();
+    }
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "17171717-1717-4171-8171-171717171717" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    expect(evaluated.status).toBe(200);
+
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({ successCount: 4, usesRemaining: 96, cap: 100 });
+  });
+
+  it("keeps evaluate open after three successes when the trial cap is unlimited", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm, env: { trialSuccessCap: null } });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    for (const key of [
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+      "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+    ]) {
+      const res = await app.request("/v1/evaluations", {
+        method: "POST",
+        headers: { ...headers, "Idempotency-Key": key },
+        body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+      });
+      expect(res.status).toBe(200);
+    }
+    expect(jev.calls).toBe(4);
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({ successCount: 4, usesRemaining: null, cap: null });
+  });
+
   it("records a correction, notes, history totals, and a single-row delete", async () => {
     const { jev, llm } = contactProviders();
     const { app, db } = createTestApp({ jev, llm });
@@ -669,14 +1116,17 @@ describe("POST /v1/evaluations", () => {
       evaluations: [
         {
           id: created.id,
+          status: "success",
           action: "contact",
+          roleId: role.id,
           roleTitle: "Senior backend engineer",
+          candidateName: "",
           jevTotalUsd: 0.00009156,
-          llmTotalUsd: 0.002556,
+          llmTotalUsd: 0,
           comparisonEnabled: true,
         },
       ],
-      totals: { jevUsd: 0.00009156, llmUsd: 0.002556 },
+      totals: { jevUsd: 0.00009156, llmUsd: 0 },
     });
 
     const removed = await app.request(`/v1/evaluations/${created.id}`, { method: "DELETE", headers });
@@ -684,6 +1134,146 @@ describe("POST /v1/evaluations", () => {
     expect(getEvaluation(db, created.id)).toBeUndefined();
     const me = await app.request("/v1/me", { headers });
     expect(await me.json()).toMatchObject({ successCount: 1, usesRemaining: 2 });
+  });
+});
+
+describe("GET /v1/evaluations/:id", () => {
+  it("includes the role title and criterion labels from that run", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "11111111-1111-4111-8111-111111111111" },
+      body: JSON.stringify(
+        evaluateBody(role.id, rubric.id, {
+          approvedText: "Headline\nTim Glaser — CEO at TypeSafe\n\nAbout\nLed the payments API in Go for four years.",
+        }),
+      ),
+    });
+    const created = await evaluated.json();
+
+    const got = await app.request(`/v1/evaluations/${created.id}`, { headers });
+    expect(got.status).toBe(200);
+    const body = await got.json();
+    expect(body.roleTitle).toBe("Senior backend engineer");
+    expect(body.candidateName).toBe("Tim Glaser");
+    expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.label).toBe(
+      "Go, five or more years",
+    );
+  });
+});
+
+describe("GET /v1/evaluations", () => {
+  it("includes the LinkedIn name from the Headline section", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "15151515-1515-4151-8151-151515151515" },
+      body: JSON.stringify(
+        evaluateBody(role.id, rubric.id, {
+          approvedText: "Headline\nTim Glaser — CEO at TypeSafe\n\nAbout\nLed the payments API in Go for four years.",
+          keepExtracts: false,
+        }),
+      ),
+    });
+    expect(evaluated.status).toBe(200);
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(history.status).toBe(200);
+    expect(await history.json()).toMatchObject({
+      evaluations: [{ candidateName: "Tim Glaser", roleTitle: "Senior backend engineer" }],
+    });
+  });
+
+  it("includes status on each item and returns newest first", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const older = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "12121212-1212-4121-8121-121212121212" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const newer = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "13131313-1313-4131-8131-131313131313" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const first = await older.json();
+    const second = await newer.json();
+    const firstRow = getEvaluation(db, first.id);
+    db.update(evaluations)
+      .set({ createdAt: (firstRow?.createdAt ?? 0) - 1000 })
+      .where(eq(evaluations.id, first.id))
+      .run();
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(history.status).toBe(200);
+    const body = await history.json();
+    expect(body.evaluations.map((item: { id: string; status: string }) => ({ id: item.id, status: item.status }))).toEqual([
+      { id: second.id, status: "success" },
+      { id: first.id, status: "success" },
+    ]);
+  });
+
+  it("lists a jev_failed row with a status that is not success", async () => {
+    const jev = new FakeJev(() => ({ ok: false, reason: "timeout" }));
+    const { llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const failed = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "14141414-1414-4141-8141-141414141414" },
+      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    });
+    const failure = await failed.json();
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(history.status).toBe(200);
+    const body = await history.json();
+    expect(body.evaluations).toEqual([
+      expect.objectContaining({ id: failure.id, status: "jev_failed" }),
+    ]);
+    expect(body.evaluations[0].status).not.toBe("success");
+  });
+});
+
+describe("DELETE /v1/evaluations?roleId", () => {
+  it("deletes only that role's evaluations and leaves the other role's history", async () => {
+    const { jev, llm } = contactProviders();
+    const { app, db } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const first = await approveRubric(app, headers);
+    const second = await approveRubric(app, headers);
+    const kept = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "16161616-1616-4161-8161-161616161616" },
+      body: JSON.stringify(evaluateBody(first.role.id, first.rubric.id)),
+    });
+    const wiped = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "17171717-1717-4171-8171-171717171717" },
+      body: JSON.stringify(evaluateBody(second.role.id, second.rubric.id)),
+    });
+    const keptRow = await kept.json();
+    const wipedRow = await wiped.json();
+
+    const removed = await app.request(`/v1/evaluations?roleId=${second.role.id}`, { method: "DELETE", headers });
+    expect(removed.status).toBe(204);
+    expect(getEvaluation(db, wipedRow.id)).toBeUndefined();
+    expect(getEvaluation(db, keptRow.id)?.id).toBe(keptRow.id);
+
+    const history = await app.request("/v1/evaluations", { headers });
+    expect(await history.json()).toMatchObject({
+      evaluations: [{ id: keptRow.id, roleId: first.role.id }],
+    });
   });
 });
 

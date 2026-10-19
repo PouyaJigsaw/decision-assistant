@@ -45,4 +45,214 @@ describe("createApi", () => {
     await expect(api.me()).rejects.toMatchObject({ status: 401 });
     expect(token).toBeNull();
   });
+
+  it("stores the signup token after POST /v1/users", async () => {
+    const { createApi } = await import("./api");
+    let token: string | null = null;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/users") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          email: "new.user@example.com",
+          password: "long-enough",
+        });
+        return new Response(JSON.stringify({ token: "tok-signup", expiresAt: "2099-01-01T00:00:00.000Z" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => token,
+      set: async (value) => {
+        token = value;
+      },
+      clear: async () => {
+        token = null;
+      },
+    });
+
+    await api.signup("new.user@example.com", "long-enough");
+    expect(token).toBe("tok-signup");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends a client completion with a rubric draft and a comparison", async () => {
+    const { createApi } = await import("./api");
+    const completion = { model: "gpt-5.4", text: '{"criteria":[]}', inputTokens: 2, outputTokens: 1 };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/roles/r1/rubric-drafts") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({ notes: "Need Go.", completion });
+        return new Response(JSON.stringify({ criteria: [] }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/v1/evaluations/e1/comparison") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual(completion);
+        return new Response(JSON.stringify({ id: "e1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+    await api.draftRubric("r1", "Need Go.", completion);
+    await api.postComparison("e1", completion);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("gets one evaluation from /v1/evaluations/:id", async () => {
+    const { createApi } = await import("./api");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/evaluations/e1")) {
+        return new Response(JSON.stringify({ id: "e1", roleTitle: "Senior backend" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+
+    await expect(api.getEvaluation("e1")).resolves.toEqual({ id: "e1", roleTitle: "Senior backend" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a role with title, company, and summary", async () => {
+    const { createApi } = await import("./api");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/roles") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+          summary: "AIM is a deep-tech startup.",
+        });
+        return new Response(
+          JSON.stringify({
+            id: "r1",
+            title: "Forward Deployed Engineer",
+            company: "AIM",
+            summary: "AIM is a deep-tech startup.",
+          }),
+          { status: 201, headers: { "content-type": "application/json" } },
+        );
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+
+    await expect(
+      api.createRole("Forward Deployed Engineer", { company: "AIM", summary: "AIM is a deep-tech startup." }),
+    ).resolves.toEqual({
+      id: "r1",
+      title: "Forward Deployed Engineer",
+      company: "AIM",
+      summary: "AIM is a deep-tech startup.",
+    });
+  });
+
+  it("lists roles from GET /v1/roles", async () => {
+    const { createApi } = await import("./api");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/roles")) {
+        return new Response(JSON.stringify({ roles: [{ id: "r1", title: "Staff engineer" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+
+    await expect(api.listRoles()).resolves.toEqual({ roles: [{ id: "r1", title: "Staff engineer" }] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads the current rubric from GET /v1/roles/:id/rubrics/current", async () => {
+    const { createApi } = await import("./api");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/v1/roles/role-1/rubrics/current")) {
+        return new Response(JSON.stringify({ id: "rv1", version: 2, criteria: [{ id: "go" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+
+    await expect(api.getCurrentRubric("role-1")).resolves.toEqual({
+      id: "rv1",
+      version: 2,
+      criteria: [{ id: "go" }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs out with DELETE /v1/session and clears the token", async () => {
+    const { createApi } = await import("./api");
+    let token: string | null = "tok-1";
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/session") && init?.method === "DELETE") {
+        expect(new Headers(init.headers).get("Authorization")).toBe("Bearer tok-1");
+        return new Response(null, { status: 204 });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => token,
+      set: async (value) => {
+        token = value;
+      },
+      clear: async () => {
+        token = null;
+      },
+    });
+
+    await api.logout();
+    expect(token).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });

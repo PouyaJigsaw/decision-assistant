@@ -1,3 +1,4 @@
+import { PRODUCT_NAME, usesRemainingCopy } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 export type PanelError = { status: number; body: unknown };
@@ -21,35 +22,60 @@ function errorMessage(error: PanelError) {
   if (body.error === "evaluations_disabled") {
     return "Evaluate is turned off. No provider call was made.";
   }
+  if (
+    body.error === "subscription_sharing_usage_limit_exceeded" ||
+    body.error === "subscription_sharing_usage_unavailable"
+  ) {
+    return "Usage limit reached. Review the plan or app limit in ChatGPT settings.";
+  }
   return "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.";
 }
 
 export function ErrorScreen({
   error,
   usesRemaining,
+  cap = 3,
   onRetry,
+  onManageUsage,
+  onBack,
 }: {
   error: PanelError;
-  usesRemaining?: number;
+  usesRemaining?: number | null;
+  cap?: number | null;
   onRetry?: () => void;
+  onManageUsage?: () => void;
+  onBack?: () => void;
 }) {
+  const usageLimit =
+    bodyError(error) === "subscription_sharing_usage_limit_exceeded" ||
+    bodyError(error) === "subscription_sharing_usage_unavailable";
   const closed = bodyError(error) === "trial_cap" || bodyError(error) === "daily_spend_cap" || bodyError(error) === "evaluations_disabled";
   const title =
     bodyError(error) === "trial_cap"
       ? "Trial closed"
-      : closed
+      : usageLimit
+        ? "Usage limit reached"
+        : closed
         ? "Evaluate is closed."
         : "Evaluation failed";
 
   return (
     <section className="panel">
-      <PanelHeader title="Decision Assistant" subtitle="Error" />
+      <PanelHeader title={PRODUCT_NAME} subtitle="Error" onBack={onBack} />
       <div>
         <h2>{title}</h2>
         <p className="lede">{errorMessage(error)}</p>
-        {usesRemaining != null ? <p className="meter">Uses remaining: {usesRemaining} of 3</p> : null}
+        {usesRemaining === undefined ? null : (
+          <p className="meter">
+            {usesRemainingCopy(usesRemaining, cap)}
+          </p>
+        )}
       </div>
-      {onRetry && !closed ? (
+      {usageLimit && onManageUsage ? (
+        <button className="primary" type="button" onClick={onManageUsage}>
+          Manage usage
+        </button>
+      ) : onRetry && !closed ? (
         <button className="primary" type="button" onClick={onRetry}>
           Retry
         </button>

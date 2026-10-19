@@ -1,60 +1,103 @@
+import {
+  chromeLocalKv,
+  createChromeOAuthHost,
+  disconnectChatGpt,
+  signInWithChatGpt,
+} from "../src/chatgpt-oauth";
 import { extractSections } from "../src/extract";
-
-function readDocument() {
-  const headingEls = Array.from(document.querySelectorAll("h1, h2"));
-  const headings = headingEls.map((heading, index) => {
-    const level = heading.tagName === "H1" ? 1 : 2;
-    const text = (heading.textContent ?? "").trim();
-    const chunks: string[] = [];
-    let node: ChildNode | null = heading.nextSibling;
-    const stop = headingEls[index + 1] ?? null;
-    while (node && node !== stop) {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const value = node.textContent?.trim();
-        if (value) chunks.push(value);
-      } else if (node.nodeType === Node.ELEMENT_NODE) {
-        const el = node as Element;
-        if (el.matches("h1, h2")) break;
-        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-        let textNode = walker.nextNode();
-        while (textNode) {
-          const value = textNode.textContent?.trim();
-          if (value) chunks.push(value);
-          textNode = walker.nextNode();
-        }
-      }
-      node = node.nextSibling;
-    }
-    return { level, text, body: chunks.join(" ") };
-  });
-  return { title: document.title, url: location.href, headings };
-}
+import { readDocument } from "../src/read-document";
 
 export default defineBackground(() => {
   chrome.runtime.onInstalled.addListener(() => {
     void chrome.sidePanel.setOptions({ path: "sidepanel.html", enabled: true });
+    void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
   });
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
 
   chrome.action.onClicked.addListener((tab) => {
     void captureAndOpen(tab.id);
   });
+
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (!message || typeof message !== "object") return;
+    if (message.type === "capture") {
+      void captureAndOpen(typeof message.tabId === "number" ? message.tabId : undefined).then(() => {
+        sendResponse({ ok: true });
+      });
+      return true;
+    }
+    if (message.type === "chatgpt-signin") {
+      void signInWithChatGpt(createChromeOAuthHost(), chromeLocalKv())
+        .then((session) => sendResponse({ ok: true, session }))
+        .catch((error: unknown) =>
+          sendResponse({ ok: false, error: error instanceof Error ? error.message : "oauth_failed" }),
+        );
+      return true;
+    }
+    if (message.type === "chatgpt-disconnect") {
+      void disconnectChatGpt(createChromeOAuthHost(), chromeLocalKv())
+        .then(() => sendResponse({ ok: true }))
+        .catch((error: unknown) =>
+          sendResponse({ ok: false, error: error instanceof Error ? error.message : "oauth_failed" }),
+        );
+      return true;
+    }
+  });
 });
 
 async function captureAndOpen(tabId: number | undefined) {
+  if (tabId == null) {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    tabId = tab?.id;
+  }
   if (tabId == null) return;
-  const injected = await chrome.scripting.executeScript({
-    target: { tabId },
-    func: readDocument,
-  });
-  const doc = injected[0]?.result;
-  if (!doc) return;
-  const extracted = extractSections(doc);
-  await chrome.storage.session.set({
-    extract: {
-      url: extracted.url,
-      sections: extracted.sections,
-      capturedAt: Date.now(),
-    },
-  });
+  try {
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: readDocument,
+    });
+    const doc = injected[0]?.result;
+    if (!doc) {
+      await chrome.storage.session.set({
+        extract: {
+          url: "",
+          sections: [
+            {
+              id: "capture-failed",
+              title: "Capture failed",
+              text: "The script ran but returned no page text. Stay on the page you want and try Read this tab.",
+            },
+          ],
+          capturedAt: Date.now(),
+        },
+      });
+    } else {
+      const extracted = extractSections(doc);
+      await chrome.storage.session.set({
+        extract: {
+          url: extracted.url,
+          sections: extracted.sections,
+          capturedAt: Date.now(),
+        },
+      });
+    }
+  } catch (error) {
+    await chrome.storage.session.set({
+      extract: {
+        url: "",
+        sections: [
+          {
+            id: "capture-failed",
+            title: "Capture failed",
+            text:
+              error instanceof Error
+                ? error.message
+                : "The page could not be read. Open a profile tab and click the toolbar icon.",
+          },
+        ],
+        capturedAt: Date.now(),
+      },
+    });
+  }
   await chrome.sidePanel.open({ tabId });
 }
