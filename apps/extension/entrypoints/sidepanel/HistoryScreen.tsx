@@ -1,5 +1,6 @@
 import { formatUsd, type Action } from "@decision-assistant/domain";
 import { useEffect, useState } from "react";
+import { PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 const ACTION_LABEL: Record<Action, string> = {
@@ -44,14 +45,14 @@ export function HistoryScreen({
   if (!data) {
     return (
       <section className="panel">
-        <PanelHeader title="Decision Assistant" subtitle="History" />
+        <PanelHeader title={PRODUCT_NAME} subtitle="History" />
       </section>
     );
   }
 
   return (
     <section className="panel">
-      <PanelHeader title="Decision Assistant" subtitle="History" />
+      <PanelHeader title={PRODUCT_NAME} subtitle="History" />
       <div>
         <h2>Running total</h2>
         <p>Jev {formatUsd(data.totals.jevUsd)}</p>

@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { PRODUCT_NAME } from "../../src/copy";
 
 export function SignInScreen({
   onSubmit,
@@ -18,7 +19,7 @@ export function SignInScreen({
   return (
     <section className="panel">
       <header className="panel-brand">
-        <h1>Decision Assistant</h1>
+        <h1>{PRODUCT_NAME}</h1>
         <p>Local backbone</p>
       </header>
       <form className="stack" onSubmit={handleSubmit}>

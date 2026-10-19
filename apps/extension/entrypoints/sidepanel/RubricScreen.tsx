@@ -1,6 +1,7 @@
 import { formatUsd } from "@decision-assistant/domain";
 import { useState, type FormEvent } from "react";
 import { ApiError } from "../../src/api";
+import { PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 import type { DraftResult } from "./RoleScreen";
 
@@ -59,7 +60,7 @@ export function RubricScreen({
 
   return (
     <section className="panel">
-      <PanelHeader title="Decision Assistant" subtitle={roleTitle} />
+      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} />
       <div>
         <h2>Review the rubric</h2>
         <p className="lede">Edit the wording and the kind. Approving creates version 1. Protected criteria are omitted.</p>

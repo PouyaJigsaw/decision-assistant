@@ -1,9 +1,10 @@
+import { PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 export function EvaluatingScreen({ roleTitle = "Evaluating" }: { roleTitle?: string }) {
   return (
     <section className="panel">
-      <PanelHeader title="Decision Assistant" subtitle={roleTitle} />
+      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} />
       <div>
         <h2>Evaluating</h2>
         <p className="lede">
