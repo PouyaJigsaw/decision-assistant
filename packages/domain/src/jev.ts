@@ -7,10 +7,12 @@ import {
 import type { ChoiceResult, Criterion, CriterionAnswer, SeniorityResult, TokenUsage } from "./types";
 
 const CHOICE_CRITERIA: Record<ChoiceResult, string> = {
-  match: "The approved profile supports this criterion.",
-  mismatch: "The approved profile contradicts this criterion.",
-  no_evidence: "The approved profile does not contain evidence for this criterion.",
-  contradictory: "The approved profile contains evidence for and against this criterion.",
+  match: "The approved profile supports the qualification or experience in the question.",
+  mismatch:
+    "Explicit evidence in the approved profile establishes that the criterion is not met. Absence of an activity, skill, degree, or duration is not a mismatch. Four documented years do not prove the candidate has only four years.",
+  no_evidence:
+    "The approved profile does not establish the criterion. A missing mention does not establish that the candidate lacks it. A missing degree does not establish that the candidate has none.",
+  contradictory: "The approved profile contains conflicting evidence about the criterion.",
 };
 
 const SENIORITY_CRITERIA: [string, string, string, string] = [

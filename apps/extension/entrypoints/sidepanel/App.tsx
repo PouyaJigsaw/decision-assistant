@@ -107,13 +107,18 @@ function jobDescriptionFor(role: RoleRecord | null, fallback = ""): string {
 }
 
 function withLabels(evaluation: ResultEvaluation, criteria: DraftResult["criteria"]): ResultEvaluation {
-  const labels = new Map(criteria.map((item) => [item.id, item.label]));
+  const byId = new Map(criteria.map((item) => [item.id, item]));
   return {
     ...evaluation,
-    answers: evaluation.answers.map((answer) => ({
-      ...answer,
-      label: answer.label ?? labels.get(answer.criterionId),
-    })),
+    answers: evaluation.answers.map((answer) => {
+      const criterion = byId.get(answer.criterionId);
+      return {
+        ...answer,
+        label: answer.label ?? criterion?.label,
+        prompt: answer.prompt ?? criterion?.prompt,
+        kind: answer.kind ?? criterion?.kind,
+      };
+    }),
   };
 }
 

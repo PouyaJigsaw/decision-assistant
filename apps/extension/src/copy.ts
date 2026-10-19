@@ -1,4 +1,19 @@
-import { CONFIDENCE_THRESHOLD, type ReasonCode } from "@decision-assistant/domain";
+import {
+  CONFIDENCE_THRESHOLD,
+  presentAnswer,
+  type Criterion,
+  type ReasonCode,
+} from "@decision-assistant/domain";
+
+export const IMPORTANCE_LABELS: Record<Criterion["kind"], string> = {
+  requirement: "Must have",
+  preference: "Nice to have",
+  disqualifier: "Dealbreaker",
+  seniority: "Seniority target",
+};
+
+export const ANSWER_MEANINGS =
+  "Yes = the profile supports it. No = the profile explicitly contradicts it. Not sure = missing, conflicting, or inconclusive. Certain = the policy will use this call.";
 
 export const PRODUCT_NAME = "Who Fits?";
 
@@ -55,8 +70,9 @@ export function isCertain(confidence: number): boolean {
   return confidence >= CONFIDENCE_THRESHOLD;
 }
 
-export function isConfirmedMatch(result: string, confidence: number): boolean {
-  return isCertain(confidence) && chipTone(result) === "match";
+export function isConfirmedMatch(result: string, confidence: number, kind?: Criterion["kind"]): boolean {
+  const presented = presentAnswer({ kind, result, confidence });
+  return presented.tone === "match" && !presented.uncertain;
 }
 
 export function chipLabel(result: string, confidence: number): string {

@@ -21,6 +21,10 @@ describe("draftLlmRequest", () => {
     });
     expect(DRAFT_INSTRUCTIONS).toContain("Return only JSON");
     expect(DRAFT_INSTRUCTIONS).toContain("protected traits");
+    expect(DRAFT_INSTRUCTIONS).toContain("Has this person");
+    expect(DRAFT_INSTRUCTIONS).toContain("Evidence to look for:");
+    expect(DRAFT_INSTRUCTIONS).toContain("passionate");
+    expect(DRAFT_INSTRUCTIONS).not.toContain("Synopsys");
   });
 });
 
@@ -33,6 +37,11 @@ describe("compareLlmRequest", () => {
     expect(Object.keys(payload.questions)).toEqual(sampleRubric.map((item) => item.id));
     expect(payload.questions.go?.type).toBe("choice");
     expect(payload.questions.seniority?.type).toBe("score");
+    const go = payload.questions.go as { criteria?: { mismatch?: string; no_evidence?: string } };
+    expect(go.criteria?.mismatch).toContain("Absence");
+    expect(go.criteria?.no_evidence).toContain("missing degree");
+    expect(COMPARE_INSTRUCTIONS).toContain("never a mismatch");
+    expect(COMPARE_INSTRUCTIONS).toContain("only four years");
     expect(COMPARE_JSON_SCHEMA.required).toEqual(["answers"]);
   });
 });
@@ -46,6 +55,16 @@ describe("parseDraftCompletion", () => {
     ).toEqual({
       ok: true,
       criteria: [{ kind: "requirement", label: "Go", prompt: "Five years of Go?" }],
+    });
+    const screening =
+      "Has this person investigated issues reported by QA?\nEvidence to look for: a described investigation and the fix.";
+    expect(
+      parseDraftCompletion(
+        JSON.stringify({ criteria: [{ kind: "preference", label: "QA issues", prompt: screening }] }),
+      ),
+    ).toEqual({
+      ok: true,
+      criteria: [{ kind: "preference", label: "QA issues", prompt: screening }],
     });
     expect(
       parseDraftCompletion(

@@ -746,12 +746,17 @@ function toEvaluationResponse(
 ) {
   const rubric = db.select().from(rubricVersions).where(eq(rubricVersions.id, row.rubricVersionId)).get();
   const criteria = (rubric ? JSON.parse(rubric.criteriaJson) : []) as Criterion[];
-  const labels = new Map(criteria.map((item) => [item.id, item.label]));
+  const byId = new Map(criteria.map((item) => [item.id, item]));
   const storedAnswers = row.answersJson ? JSON.parse(row.answersJson) : [];
-  const answers = storedAnswers.map((answer: { criterionId: string; label?: string }) => ({
-    ...answer,
-    label: answer.label ?? labels.get(answer.criterionId),
-  }));
+  const answers = storedAnswers.map((answer: { criterionId: string; label?: string; prompt?: string; kind?: string }) => {
+    const criterion = byId.get(answer.criterionId);
+    return {
+      ...answer,
+      label: criterion?.label ?? answer.label,
+      prompt: criterion?.prompt ?? answer.prompt,
+      kind: criterion?.kind ?? answer.kind,
+    };
+  });
   const jev =
     row.jevModel == null
       ? null

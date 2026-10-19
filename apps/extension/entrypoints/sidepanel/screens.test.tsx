@@ -299,9 +299,11 @@ describe("RubricScreen", () => {
     expect(screen.getByText("Omitted: age")).toBeTruthy();
     expect(screen.getByText("Forward Deployed Engineer · AIM")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Change job description" })).toBeTruthy();
+    expect(screen.getByText("Review the questions and what counts as evidence. Missing information will be marked Not sure.")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "Importance" })).toBeTruthy();
 
     await user.clear(screen.getByDisplayValue("Is there evidence of Go?"));
-    await user.type(screen.getByLabelText("Prompt"), "edited prompt");
+    await user.type(screen.getByLabelText("Screening question and evidence guidance"), "edited prompt");
     await user.click(screen.getByRole("button", { name: "Approve rubric" }));
 
     expect(approveRubric).toHaveBeenCalledWith([
@@ -481,18 +483,21 @@ describe("ResultScreen", () => {
     expect(screen.getByText("Only certain matches count.")).toBeTruthy();
     expect(screen.getByText("0 of 1 criteria confirmed.")).toBeTruthy();
     expect(
-      screen.getByText("Match = found in the profile. No evidence = silent, not a fail. Certain = the policy will use this call."),
+      screen.getByText(
+        "Yes = the profile supports it. No = the profile explicitly contradicts it. Not sure = missing, conflicting, or inconclusive. Certain = the policy will use this call.",
+      ),
     ).toBeTruthy();
     expect(screen.getAllByText("Jev").length).toBeGreaterThan(0);
     expect(screen.getAllByText("LLM").length).toBeGreaterThan(0);
-    expect(screen.getByText("– No evidence")).toBeTruthy();
+    expect(screen.getByText("– Not sure")).toBeTruthy();
+    expect(screen.getByText("Not mentioned in the profile.")).toBeTruthy();
     expect(screen.getByText("Unsure of this call · 0.44")).toBeTruthy();
-    expect(screen.getByText("✓ Match")).toBeTruthy();
+    expect(screen.getByText("✓ Yes")).toBeTruthy();
     expect(screen.getByText("Certain of this call · 0.91")).toBeTruthy();
     expect(screen.queryByRole("meter")).toBeNull();
-    expect(screen.getByText("– No evidence").className).toMatch(/chip-no_evidence/);
-    expect(screen.getByText("– No evidence").className).toMatch(/chip-unsure/);
-    expect(screen.getByText("✓ Match").className).toMatch(/chip-match/);
+    expect(screen.getByText("– Not sure").className).toMatch(/chip-no_evidence/);
+    expect(screen.getByText("– Not sure").className).toMatch(/chip-unsure/);
+    expect(screen.getByText("✓ Yes").className).toMatch(/chip-match/);
     expect(screen.getByText("Led the payments API in Go for four years.")).toBeTruthy();
     expect(screen.getByText("Tim Glaser · evaluated for Senior backend")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "This run" })).toBeTruthy();
@@ -503,6 +508,47 @@ describe("ResultScreen", () => {
     expect(screen.getByText("Written 88 · on your account")).toBeTruthy();
     expect(screen.getByText("Jev does not write text. Its output tokens are counted and not billed.")).toBeTruthy();
     expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
+  });
+
+  it("shows the question, and a dealbreaker Yes as a negative finding", () => {
+    render(
+      <ResultScreen
+        evaluation={{
+          id: "e2",
+          action: "skip",
+          score: 0,
+          reasonCode: "disqualifier_match",
+          answers: [
+            {
+              criterionId: "visa",
+              label: "Work authorization exclusion",
+              kind: "disqualifier",
+              prompt:
+                "Has this person stated they cannot work in the stated location?\nEvidence to look for: an explicit statement that they cannot work there.",
+              result: "match",
+              confidence: 0.91,
+              excerpt: null,
+              llmResult: "no_evidence",
+              llmConfidence: 0.8,
+              llmExcerpt: null,
+            },
+          ],
+          jev: null,
+          llm: null,
+          usesRemaining: null,
+        }}
+        api={{ saveNote: async () => undefined }}
+        onRetry={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("Has this person stated they cannot work in the stated location?")).toBeTruthy();
+    expect(screen.getByText(/Evidence to look for:/).className).toBe("evidence-guidance");
+    expect(screen.getByText("× Yes").className).toMatch(/chip-mismatch/);
+    expect(screen.getByText("The exclusion condition is present.")).toBeTruthy();
+    expect(screen.getByText("– Not sure").className).toMatch(/chip-no_evidence/);
+    expect(screen.getByText("Not mentioned in the profile.")).toBeTruthy();
+    expect(screen.getByText("0 of 1 criteria confirmed.")).toBeTruthy();
   });
 });
 
@@ -1075,7 +1121,14 @@ describe("SittingScreen", () => {
         roleTitle="Forward Deployed Engineer"
         company="AIM"
         jobDescription="AIM is a deep-tech startup building evaluation systems for hiring teams."
-        criteria={[{ id: "go", kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" }]}
+        criteria={[
+          {
+            id: "go",
+            kind: "requirement",
+            label: "Go",
+            prompt: "Has this person shipped production Go?\nEvidence to look for: a production service they built.",
+          },
+        ]}
         onReadTab={() => undefined}
         onChangeJob={() => undefined}
         onBack={() => undefined}
@@ -1086,8 +1139,12 @@ describe("SittingScreen", () => {
     expect(screen.getByRole("heading", { name: "Job description" })).toBeTruthy();
     expect(screen.getByText(/deep-tech startup/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Rubric" })).toBeTruthy();
+    expect(screen.getByText("Must have")).toBeTruthy();
     expect(screen.getByText("Go")).toBeTruthy();
-    expect(screen.getByText("Is there evidence of Go?")).toBeTruthy();
+    expect(screen.getByText("Has this person shipped production Go?")).toBeTruthy();
+    expect(screen.getByText("Evidence to look for: a production service they built.").className).toBe(
+      "evidence-guidance",
+    );
     expect(screen.getByRole("button", { name: "Read this tab" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Change job description" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Back to dashboard" })).toBeNull();

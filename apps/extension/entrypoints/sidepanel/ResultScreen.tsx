@@ -1,16 +1,20 @@
-import { formatUsd, type Action, type ReasonCode } from "@decision-assistant/domain";
+import {
+  formatUsd,
+  presentAnswer,
+  splitScreeningPrompt,
+  type Action,
+  type Criterion,
+  type ReasonCode,
+} from "@decision-assistant/domain";
 import { useState } from "react";
 import {
+  ANSWER_MEANINGS,
   certaintyCopy,
-  chipTone,
-  isCertain,
   isConfirmedMatch,
   evaluatedForCopy,
   PRODUCT_NAME,
   reasonCopy,
   usesRemainingCopy,
-  resultLabel,
-  resultMark,
 } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
@@ -24,6 +28,8 @@ const ACTIONS: { id: Action; name: string }[] = [
 export type ResultAnswer = {
   criterionId: string;
   label?: string;
+  prompt?: string;
+  kind?: Criterion["kind"];
   result: string;
   confidence: number;
   excerpt: null;
@@ -44,6 +50,16 @@ export type ResultEvaluation = {
   llm: { usage: { inputTokens: number; outputTokens: number }; cost: { totalUsd: number } } | null;
   usesRemaining: number | null;
 };
+
+function ScreeningPrompt({ prompt }: { prompt: string }) {
+  const screening = splitScreeningPrompt(prompt);
+  return (
+    <>
+      <p className="screening-question">{screening.question}</p>
+      {screening.evidence ? <p className="evidence-guidance">{screening.evidence}</p> : null}
+    </>
+  );
+}
 
 function formatTokens(count: number): string {
   return count.toLocaleString("en-US");
@@ -76,15 +92,31 @@ function UsageCol({
   );
 }
 
-function CallCard({ name, result, confidence }: { name: string; result: string; confidence: number }) {
-  const tone = chipTone(result);
-  const unsure = !isCertain(confidence);
+function answerMark(tone: "match" | "mismatch" | "no_evidence"): string {
+  if (tone === "match") return "✓";
+  if (tone === "mismatch") return "×";
+  return "–";
+}
+
+function CallCard({
+  name,
+  kind,
+  result,
+  confidence,
+}: {
+  name: string;
+  kind?: Criterion["kind"];
+  result: string;
+  confidence: number;
+}) {
+  const presented = presentAnswer({ kind, result, confidence });
   return (
     <div className="compare-col">
       <p className="compare-label">{name}</p>
-      <p className={`chip chip-${tone}${unsure ? " chip-unsure" : ""}`}>
-        {resultMark(result)} {resultLabel(result)}
+      <p className={`chip chip-${presented.tone}${presented.uncertain ? " chip-unsure" : ""}`}>
+        {answerMark(presented.tone)} {presented.label}
       </p>
+      {presented.detail ? <p className="lede">{presented.detail}</p> : null}
       <p className="lede">{certaintyCopy(confidence)}</p>
     </div>
   );
@@ -119,7 +151,9 @@ export function ResultScreen({
 }) {
   const [note, setNote] = useState("");
   const actionTitle = ACTIONS.find((item) => item.id === evaluation.action)?.name ?? "Result";
-  const confirmed = evaluation.answers.filter((answer) => isConfirmedMatch(answer.result, answer.confidence)).length;
+  const confirmed = evaluation.answers.filter((answer) =>
+    isConfirmedMatch(answer.result, answer.confidence, answer.kind),
+  ).length;
   const jevUsd = evaluation.jev?.cost.totalUsd ?? 0;
   const llmUsd = evaluation.llm?.cost.totalUsd ?? 0;
   const runTotal = jevUsd + llmUsd;
@@ -151,7 +185,7 @@ export function ResultScreen({
         </p>
       </div>
       <p className="lede">
-        Match = found in the profile. No evidence = silent, not a fail. Certain = the policy will use this call.
+        {ANSWER_MEANINGS}
       </p>
       <div className="stack">
         <button className="primary" type="button" onClick={onRetry}>
@@ -175,10 +209,16 @@ export function ResultScreen({
         return (
           <article className="card" key={answer.criterionId}>
             <h3>{answer.label ?? answer.criterionId}</h3>
+            {answer.prompt ? <ScreeningPrompt prompt={answer.prompt} /> : null}
             <div className={disagree ? "compare-row compare-disagree" : "compare-row"}>
-              <CallCard name="Jev" result={answer.result} confidence={answer.confidence} />
+              <CallCard name="Jev" kind={answer.kind} result={answer.result} confidence={answer.confidence} />
               {hasLlm ? (
-                <CallCard name="LLM" result={answer.llmResult ?? ""} confidence={answer.llmConfidence ?? 0} />
+                <CallCard
+                  name="LLM"
+                  kind={answer.kind}
+                  result={answer.llmResult ?? ""}
+                  confidence={answer.llmConfidence ?? 0}
+                />
               ) : (
                 <div className="compare-col">
                   <p className="compare-label">LLM</p>

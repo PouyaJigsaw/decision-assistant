@@ -471,6 +471,12 @@ describe("DELETE /v1/roles", () => {
     expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.label).toBe(
       "Go, five or more years",
     );
+    expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.prompt).toBe(
+      "Is there evidence of at least five years of Go?",
+    );
+    expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.kind).toBe(
+      "requirement",
+    );
   });
 });
 
@@ -1233,6 +1239,10 @@ describe("GET /v1/evaluations/:id", () => {
     expect(body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go")?.label).toBe(
       "Go, five or more years",
     );
+    const go = body.answers.find((answer: { criterionId: string }) => answer.criterionId === "go");
+    expect(go?.prompt).toBe("Is there evidence of at least five years of Go?");
+    expect(go?.kind).toBe("requirement");
+    expect(go?.result).toBeDefined();
   });
 });
 

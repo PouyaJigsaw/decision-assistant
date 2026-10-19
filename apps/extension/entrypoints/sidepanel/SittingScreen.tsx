@@ -1,13 +1,7 @@
-import { PRODUCT_NAME, roleHeading } from "../../src/copy";
+import { splitScreeningPrompt } from "@decision-assistant/domain";
+import { IMPORTANCE_LABELS, PRODUCT_NAME, roleHeading } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 import type { DraftResult } from "./RoleScreen";
-
-const KIND_LABELS = {
-  requirement: "Required",
-  preference: "Preferred",
-  disqualifier: "Disqualifier",
-  seniority: "Seniority",
-} as const;
 
 export function SittingScreen({
   roleTitle,
@@ -37,13 +31,17 @@ export function SittingScreen({
       </div>
       <div className="stack">
         <h2>Rubric</h2>
-        {criteria.map((row) => (
-          <article className="card" key={row.id}>
-            <p className="pill">{KIND_LABELS[row.kind]}</p>
-            <h3>{row.label}</h3>
-            <p>{row.prompt}</p>
-          </article>
-        ))}
+        {criteria.map((row) => {
+          const screening = splitScreeningPrompt(row.prompt);
+          return (
+            <article className="card" key={row.id}>
+              <p className="pill">{IMPORTANCE_LABELS[row.kind]}</p>
+              <h3>{row.label}</h3>
+              <p className="screening-question">{screening.question}</p>
+              {screening.evidence ? <p className="evidence-guidance">{screening.evidence}</p> : null}
+            </article>
+          );
+        })}
       </div>
       <button className="primary" type="button" onClick={onReadTab}>
         Read this tab

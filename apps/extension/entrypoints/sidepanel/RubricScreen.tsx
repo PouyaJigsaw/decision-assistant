@@ -1,16 +1,9 @@
 import { formatUsd } from "@decision-assistant/domain";
 import { useState, type FormEvent } from "react";
 import { ApiError } from "../../src/api";
-import { PRODUCT_NAME } from "../../src/copy";
+import { IMPORTANCE_LABELS, PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 import type { DraftResult } from "./RoleScreen";
-
-const KIND_LABELS = {
-  requirement: "Required",
-  preference: "Preferred",
-  disqualifier: "Disqualifier",
-  seniority: "Seniority",
-} as const;
 
 type Criterion = DraftResult["criteria"][number];
 
@@ -22,6 +15,8 @@ export function RubricScreen({
   roleTitle = "Review the rubric",
   api,
   onApproved,
+  onChangeJob,
+  onBack,
 }: {
   criteria: Criterion[];
   omitted: string[];
@@ -30,6 +25,8 @@ export function RubricScreen({
   roleTitle?: string;
   api: { approveRubric: (criteria: Criterion[]) => Promise<unknown> };
   onApproved: () => void;
+  onChangeJob?: () => void;
+  onBack?: () => void;
 }) {
   const [rows, setRows] = useState(criteria);
   const [safety, setSafety] = useState<string | undefined>();
@@ -60,23 +57,23 @@ export function RubricScreen({
 
   return (
     <section className="panel">
-      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} />
+      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} onBack={onBack} />
       <div>
         <h2>Review the rubric</h2>
-        <p className="lede">Edit the wording and the kind. Approving creates version 1. Protected criteria are omitted.</p>
+        <p className="lede">Review the questions and what counts as evidence. Missing information will be marked Not sure.</p>
       </div>
       {omitted.length > 0 ? <p className="omitted">Omitted: {omitted.join(", ")}</p> : null}
       <form className="stack" onSubmit={handleSubmit}>
         {rows.map((row, index) => (
           <div className="card" key={row.id}>
             <label className="stack">
-              <span className="field-label">Kind</span>
+              <span className="field-label">Importance</span>
               <select
                 className="pill"
                 value={row.kind}
                 onChange={(event) => update(index, { kind: event.target.value as Criterion["kind"] })}
               >
-                {Object.entries(KIND_LABELS).map(([value, label]) => (
+                {Object.entries(IMPORTANCE_LABELS).map(([value, label]) => (
                   <option key={value} value={value}>
                     {label}
                   </option>
@@ -84,12 +81,12 @@ export function RubricScreen({
               </select>
             </label>
             <label className="stack">
-              <span className="field-label">Label</span>
+              <span className="field-label">Short name</span>
               <input value={row.label} onChange={(event) => update(index, { label: event.target.value })} />
             </label>
             <label className="stack">
-              <span className="field-label">Prompt</span>
-              <input value={row.prompt} onChange={(event) => update(index, { prompt: event.target.value })} />
+              <span className="field-label">Screening question and evidence guidance</span>
+              <textarea value={row.prompt} onChange={(event) => update(index, { prompt: event.target.value })} />
             </label>
           </div>
         ))}
@@ -97,6 +94,11 @@ export function RubricScreen({
         <button className="primary" type="submit" disabled={busy}>
           Approve rubric
         </button>
+        {onChangeJob ? (
+          <button className="secondary" type="button" onClick={onChangeJob}>
+            Change job description
+          </button>
+        ) : null}
       </form>
       <p className="meter">
         Rubric draft · {usage.inputTokens} in · {usage.outputTokens} out · {formatUsd(cost.totalUsd)}
