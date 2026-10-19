@@ -106,10 +106,16 @@ export function createApi(baseUrl: string, tokenStore: TokenStore) {
       roleId: string,
       notes: string,
       completion: { model: string; text: string; inputTokens: number; outputTokens: number },
+      extras: { title?: string; company?: string } = {},
     ) {
       return request(`/v1/roles/${roleId}/rubric-drafts`, {
         method: "POST",
-        body: JSON.stringify({ notes, completion }),
+        body: JSON.stringify({
+          notes,
+          completion,
+          ...(extras.title ? { title: extras.title } : {}),
+          ...(extras.company ? { company: extras.company } : {}),
+        }),
       });
     },
     async approveRubric(roleId: string, criteria: unknown[]) {

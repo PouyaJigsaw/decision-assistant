@@ -110,7 +110,12 @@ describe("createApi", () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url.endsWith("/v1/roles/r1/rubric-drafts") && init?.method === "POST") {
-        expect(JSON.parse(String(init.body))).toEqual({ notes: "Need Go.", completion });
+        expect(JSON.parse(String(init.body))).toEqual({
+          notes: "Need Go.",
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+          completion,
+        });
         return new Response(JSON.stringify({ criteria: [] }), {
           status: 201,
           headers: { "content-type": "application/json" },
@@ -131,7 +136,10 @@ describe("createApi", () => {
       set: async () => undefined,
       clear: async () => undefined,
     });
-    await api.draftRubric("r1", "Need Go.", completion);
+    await api.draftRubric("r1", "Need Go.", completion, {
+      title: "Forward Deployed Engineer",
+      company: "AIM",
+    });
     await api.postComparison("e1", completion);
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });

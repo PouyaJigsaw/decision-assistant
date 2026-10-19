@@ -157,7 +157,7 @@ describe("ConnectionScreen", () => {
 });
 
 describe("RoleScreen", () => {
-  it("sends the job description to draftRubric", async () => {
+  it("sends the role name, company, and job description to draftRubric", async () => {
     const user = userEvent.setup();
     const draftRubric = vi.fn(async () => ({
       criteria: [],
@@ -170,11 +170,51 @@ describe("RoleScreen", () => {
 
     expect(document.querySelector("img.brand-mark")).toBeTruthy();
     const notes = enoughJobDescription();
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Forward Deployed Engineer");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("AIM");
     await user.click(screen.getByLabelText("Job description"));
     await user.paste(notes);
     await user.click(screen.getByRole("button", { name: "Draft rubric" }));
 
-    expect(draftRubric).toHaveBeenCalledWith(notes);
+    expect(draftRubric).toHaveBeenCalledWith({
+      roleName: "Forward Deployed Engineer",
+      company: "AIM",
+      notes,
+    });
+  });
+
+  it("rejects a missing role name or company without calling the model", async () => {
+    const user = userEvent.setup();
+    const draftRubric = vi.fn(async () => {
+      throw new Error("should not draft");
+    });
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+    expect(screen.getByText("Enter a role name and company.")).toBeTruthy();
+    expect(draftRubric).not.toHaveBeenCalled();
+  });
+
+  it("prefills role name, company, and job description", () => {
+    render(
+      <RoleScreen
+        api={{ draftRubric: async () => ({ criteria: [], omitted: [], usage: { inputTokens: 0, outputTokens: 0 }, cost: { totalUsd: 0 } }) }}
+        onDrafted={() => undefined}
+        initialRoleName="Forward Deployed Engineer"
+        initialCompany="AIM"
+        initialNotes="AIM is a deep-tech startup building evaluation systems."
+      />,
+    );
+
+    expect((screen.getByLabelText("Role name") as HTMLInputElement).value).toBe("Forward Deployed Engineer");
+    expect((screen.getByLabelText("Company") as HTMLInputElement).value).toBe("AIM");
+    expect((screen.getByLabelText("Job description") as HTMLTextAreaElement).value).toContain("deep-tech startup");
+    expect(screen.getByText("Forward Deployed Engineer · AIM")).toBeTruthy();
   });
 
   it("rejects an empty or short job description without calling the model", async () => {
@@ -185,6 +225,10 @@ describe("RoleScreen", () => {
 
     render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
 
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
     await user.click(screen.getByRole("button", { name: "Draft rubric" }));
     expect(
       screen.getByText("This job description is not sufficient. Paste the full posting — at least 150 words."),
@@ -207,6 +251,10 @@ describe("RoleScreen", () => {
 
     render(<RoleScreen api={{ draftRubric }} onDrafted={onDrafted} />);
 
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
     await user.click(screen.getByLabelText("Job description"));
     await user.paste(enoughJobDescription());
     await user.click(screen.getByRole("button", { name: "Draft rubric" }));
@@ -241,6 +289,7 @@ describe("RubricScreen", () => {
             prompt: "Is there evidence of Go?",
           },
         ]}
+        roleTitle="Forward Deployed Engineer · AIM"
         api={{ approveRubric }}
         onApproved={() => undefined}
         onChangeJob={() => undefined}
@@ -248,6 +297,7 @@ describe("RubricScreen", () => {
     );
 
     expect(screen.getByText("Omitted: age")).toBeTruthy();
+    expect(screen.getByText("Forward Deployed Engineer · AIM")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Change job description" })).toBeTruthy();
 
     await user.clear(screen.getByDisplayValue("Is there evidence of Go?"));
@@ -860,7 +910,7 @@ describe("DashboardScreen", () => {
         email="recruiter@example.com"
         usesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
-        sitting={{ title: "Staff Software Engineer" }}
+        sitting={{ title: "Staff Software Engineer", company: "Stripe" }}
         roles={[]}
         recent={[]}
         onNewJob={() => undefined}
@@ -871,6 +921,7 @@ describe("DashboardScreen", () => {
 
     expect(screen.getByRole("button", { name: /Continue/ })).toBeTruthy();
     expect(screen.getByText("Staff Software Engineer")).toBeTruthy();
+    expect(screen.getByText("Stripe")).toBeTruthy();
   });
 
   it("shows company and a short job description on a saved role", () => {
@@ -1031,6 +1082,7 @@ describe("SittingScreen", () => {
       />,
     );
 
+    expect(screen.getByText("Forward Deployed Engineer · AIM")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Job description" })).toBeTruthy();
     expect(screen.getByText(/deep-tech startup/)).toBeTruthy();
     expect(screen.getByRole("heading", { name: "Rubric" })).toBeTruthy();

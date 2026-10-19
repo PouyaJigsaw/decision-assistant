@@ -1,4 +1,4 @@
-import { PRODUCT_NAME } from "../../src/copy";
+import { PRODUCT_NAME, roleHeading } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 import type { DraftResult } from "./RoleScreen";
 
@@ -30,8 +30,7 @@ export function SittingScreen({
 }) {
   return (
     <section className="panel">
-      <PanelHeader title={PRODUCT_NAME} subtitle={roleTitle} onBack={onBack} />
-      {company ? <p className="lede">{company}</p> : null}
+      <PanelHeader title={PRODUCT_NAME} subtitle={roleHeading(roleTitle, company) || roleTitle} onBack={onBack} />
       <div className="stack">
         <h2>Job description</h2>
         <p className="job-notes">{jobDescription || "No job description stored for this role yet."}</p>

@@ -367,6 +367,38 @@ describe("GET /v1/roles", () => {
     });
   });
 
+  it("keeps a typed title when the summary looks like a job posting", async () => {
+    const { app } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        title: "Forward Deployed Engineer",
+        company: "AIM",
+        summary:
+          "PCT partners with venture-backed technology companies looking for Staff Software Engineers who can bridge the gap.",
+      }),
+    });
+    expect(await created.json()).toMatchObject({
+      title: "Forward Deployed Engineer",
+      company: "AIM",
+    });
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toEqual({
+      roles: [
+        {
+          id: expect.any(String),
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+          summary:
+            "PCT partners with venture-backed technology companies looking for Staff Software Engineers who can bridge the gap.",
+        },
+      ],
+    });
+  });
+
   it("stores and returns company and summary", async () => {
     const { app } = createTestApp();
     const { headers } = await signIn(app);
@@ -623,6 +655,42 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
     expect(draft.status).toBe(502);
     expect(await draft.json()).toEqual({ error: "llm_failed" });
     expect(llm.calls).toBe(0);
+  });
+
+  it("stores a typed title and company instead of parsing them from notes", async () => {
+    const { app } = createTestApp();
+    const { headers } = await signIn(app);
+    const created = await app.request("/v1/roles", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ title: "Placeholder", company: "" }),
+    });
+    const role = await created.json();
+    const notes = `About the job
+PCT partners with venture-backed technology companies looking for Staff Software Engineers who can bridge the gap. ${enoughNotes()}`;
+
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        notes,
+        title: "Forward Deployed Engineer",
+        company: "AIM",
+        completion: draftCompletion(),
+      }),
+    });
+    expect(draft.status).toBe(201);
+
+    const listed = await app.request("/v1/roles", { headers });
+    expect(await listed.json()).toMatchObject({
+      roles: [
+        {
+          id: role.id,
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+        },
+      ],
+    });
   });
 
   it("rejects a short job description before calling the model", async () => {

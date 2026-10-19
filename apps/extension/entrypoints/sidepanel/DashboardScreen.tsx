@@ -32,7 +32,7 @@ export function DashboardScreen({
   usesRemaining: number | null;
   cap?: number | null;
   totals: { jevUsd: number; llmUsd: number };
-  sitting?: { title: string } | null;
+  sitting?: { title: string; company?: string } | null;
   roles: { id: string; title: string; company?: string; summary?: string }[];
   recent: HistoryRow[];
   error?: string;
@@ -61,6 +61,7 @@ export function DashboardScreen({
         <button className="card" type="button" onClick={() => onContinue?.()}>
           <h3>Continue sitting</h3>
           <p>{sitting.title}</p>
+          {sitting.company ? <p>{sitting.company}</p> : null}
         </button>
       ) : null}
       <button className="primary" type="button" onClick={onNewJob}>

@@ -502,7 +502,9 @@ describe("App dashboard", () => {
     expect(screen.getByText("Is there evidence of Go?")).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Change job description" }));
     expect(await screen.findByRole("heading", { name: "Create a role" })).toBeTruthy();
-    expect((screen.getByRole("textbox") as HTMLTextAreaElement).value).toContain("owns APIs");
+    expect((screen.getByLabelText("Role name") as HTMLInputElement).value).toBe("Senior backend");
+    expect((screen.getByLabelText("Company") as HTMLInputElement).value).toBe("Stripe");
+    expect((screen.getByLabelText("Job description") as HTMLTextAreaElement).value).toContain("owns APIs");
     expect(screen.queryByRole("heading", { name: "Saved roles" })).toBeNull();
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(await screen.findByRole("heading", { name: "Job description" })).toBeTruthy();

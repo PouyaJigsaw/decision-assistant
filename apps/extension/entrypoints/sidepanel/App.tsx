@@ -13,6 +13,7 @@ import {
 } from "../../src/llm-credentials";
 import { OpenAiError, listModels, type ListedModel } from "../../src/openai-responses";
 import { readDocument } from "../../src/read-document";
+import { roleHeading } from "../../src/copy";
 import { completeCompare, completeDraft, selectedModel, setSelectedModel } from "../../src/user-llm";
 import { billingCopy, ConnectionScreen } from "./ConnectionScreen";
 import { DashboardScreen } from "./DashboardScreen";
@@ -22,7 +23,7 @@ import { HistoryScreen, type HistoryRow } from "./HistoryScreen";
 import { PanelHeader } from "./PanelHeader";
 import { PreviewScreen, type ExtractSection } from "./PreviewScreen";
 import { ResultScreen, type ResultEvaluation } from "./ResultScreen";
-import { RoleScreen, type DraftResult } from "./RoleScreen";
+import { RoleScreen, type DraftRequest, type DraftResult } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
 import { SittingScreen } from "./SittingScreen";
 import { SignInScreen } from "./SignInScreen";
@@ -296,28 +297,29 @@ export function App() {
 
   const roleApi = useMemo(
     () => ({
-      async draftRubric(notes: string) {
+      async draftRubric(body: DraftRequest) {
         if (needsModel()) {
           setScreen("connection");
           throw new Error("llm_not_connected");
         }
-        setJobNotes(notes);
-        const posting = parseJobPosting(notes);
-        const completion = await completeDraft(kv, oauthHost, notes);
+        setJobNotes(body.notes);
+        const posting = parseJobPosting(body.notes);
+        const completion = await completeDraft(kv, oauthHost, body.notes);
+        const typed = { title: body.roleName, company: body.company, summary: posting.summary };
         if (role) {
-          const next = { ...role, ...posting, notes };
+          const next = { ...role, ...typed, notes: body.notes };
           setRole(next);
           await chrome.storage.session.set({ panelRole: next });
-          return api.draftRubric(role.id, notes, completion);
+          return api.draftRubric(role.id, body.notes, completion, typed);
         }
-        const created = await api.createRole(posting.title, {
-          company: posting.company,
-          summary: posting.summary,
+        const created = await api.createRole(typed.title, {
+          company: typed.company,
+          summary: typed.summary,
         });
-        const next = { ...created, notes };
+        const next = { ...created, notes: body.notes };
         setRole(next);
         await chrome.storage.session.set({ panelRole: next });
-        return api.draftRubric(created.id, notes, completion);
+        return api.draftRubric(created.id, body.notes, completion, typed);
       },
     }),
     [role, connection],
@@ -543,7 +545,7 @@ export function App() {
         usesRemaining={usesRemaining ?? null}
         cap={trialCap}
         totals={totals}
-        sitting={role && rubricId ? { title: role.title } : null}
+        sitting={role && rubricId ? { title: role.title, company: role.company } : null}
         roles={roles}
         recent={recent}
         error={dashboardError}
@@ -610,6 +612,8 @@ export function App() {
       <RoleScreen
         api={roleApi}
         billing={billingCopy(connection)}
+        initialRoleName={role?.title ?? ""}
+        initialCompany={role?.company ?? ""}
         initialNotes={jobNotes}
         onBack={() => {
           if (roleFrom === "sitting") {
@@ -632,7 +636,7 @@ export function App() {
         omitted={draft.omitted}
         usage={draft.usage}
         cost={draft.cost}
-        roleTitle={role?.title}
+        roleTitle={roleHeading(role?.title, role?.company) || role?.title}
         api={rubricApi}
         onApproved={() => {
           void loadExtract().then((next) => setScreen(next ? "preview" : "sitting"));
@@ -680,7 +684,7 @@ export function App() {
     return (
       <PreviewScreen
         url={extract.url}
-        roleTitle={role?.title ?? ""}
+        roleTitle={roleHeading(role?.title, role?.company) || role?.title || ""}
         sections={extract.sections}
         api={previewApi}
         onEvaluated={() => undefined}
@@ -693,7 +697,7 @@ export function App() {
     );
   }
   if (screen === "evaluating") {
-    return <EvaluatingScreen roleTitle={role?.title} onBack={backFromExtract} />;
+    return <EvaluatingScreen roleTitle={roleHeading(role?.title, role?.company) || role?.title} onBack={backFromExtract} />;
   }
   if (screen === "error" && panelError) {
     return (
@@ -720,7 +724,7 @@ export function App() {
       <ResultScreen
         evaluation={evaluation}
         billing={billingCopy(connection)}
-        roleTitle={evaluation.roleTitle ?? role?.title}
+        roleTitle={roleHeading(evaluation.roleTitle ?? role?.title, role?.company) || evaluation.roleTitle || role?.title}
         api={{
           saveNote: (id, notes) => api.saveNote(id, notes),
         }}

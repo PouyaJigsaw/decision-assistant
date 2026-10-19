@@ -233,7 +233,13 @@ export function createApp(deps: {
       return c.json({ error: "invalid_rubric", reason: "empty_requirement" }, 422);
     }
     const parsed = parseJobPosting(notes);
-    const card = roleCard(role.title, role.company || parsed.company, role.summary || parsed.summary);
+    const title =
+      body && typeof body.title === "string" && body.title.trim() ? body.title.trim() : role.title;
+    const company =
+      body && typeof body.company === "string" && body.company.trim()
+        ? body.company.trim()
+        : role.company || parsed.company;
+    const card = roleCard(title, company, parsed.summary);
     db.update(roles)
       .set({ notes, title: card.title, company: card.company, summary: card.summary })
       .where(eq(roles.id, role.id))
@@ -806,7 +812,11 @@ function roleCard(title: string, company: string | null | undefined, summary: st
   const parsedTitleLooksReal = Boolean(parsed.title && !isChromeTitle(parsed.title));
   const repaired = isChromeTitle(stored.title);
   return {
-    title: parsedTitleLooksReal ? parsed.title : repaired ? companyName || parsed.title || "Role" : stored.title,
+    title: repaired
+      ? parsedTitleLooksReal
+        ? parsed.title
+        : companyName || parsed.title || "Role"
+      : stored.title,
     company: companyName,
     summary: stored.summary || (repaired ? parsed.summary : ""),
   };

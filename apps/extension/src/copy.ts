@@ -68,6 +68,13 @@ export function usesRemainingCopy(usesRemaining: number | null, cap: number | nu
   return `Uses remaining: ${usesRemaining} of ${cap}`;
 }
 
+export function roleHeading(roleTitle?: string, company?: string): string {
+  const role = roleTitle?.trim() ?? "";
+  const companyName = company?.trim() ?? "";
+  if (role && companyName) return `${role} · ${companyName}`;
+  return role || companyName;
+}
+
 export function evaluatedForCopy(roleTitle?: string, candidateName?: string): string {
   const role = roleTitle?.trim();
   const name = candidateName?.trim();
