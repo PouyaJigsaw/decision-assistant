@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { ApiError } from "../../src/api";
 import { PRODUCT_NAME, roleHeading } from "../../src/copy";
 import { OpenAiError } from "../../src/openai-responses";
+import { EvaluatingScreen } from "./EvaluatingScreen";
 import { PanelHeader } from "./PanelHeader";
 
 export type DraftResult = {
@@ -68,6 +69,10 @@ export function RoleScreen({
     } finally {
       setBusy(false);
     }
+  }
+
+  if (busy) {
+    return <EvaluatingScreen mode="draft" roleTitle={roleHeading(roleName, company) || undefined} />;
   }
 
   return (

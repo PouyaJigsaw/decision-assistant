@@ -1,5 +1,5 @@
 /** @vitest-environment jsdom */
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JEV_PRICE, costFromUsage, formatUsd } from "@decision-assistant/domain";
@@ -242,6 +242,85 @@ describe("RoleScreen", () => {
     expect((screen.getByRole("button", { name: "Draft rubric" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("shows the draft loading screen while the model is working", async () => {
+    const user = userEvent.setup();
+    let finishDraft: (value: {
+      criteria: [];
+      omitted: [];
+      usage: { inputTokens: number; outputTokens: number };
+      cost: { totalUsd: number };
+    }) => void = () => undefined;
+    const draftRubric = vi.fn(
+      () =>
+        new Promise<{
+          criteria: [];
+          omitted: [];
+          usage: { inputTokens: number; outputTokens: number };
+          cost: { totalUsd: number };
+        }>((resolve) => {
+          finishDraft = resolve;
+        }),
+    );
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    expect(await screen.findByRole("heading", { name: "Drafting this rubric" })).toBeTruthy();
+    expect(screen.getByRole("progressbar", { name: "Drafting" })).toBeTruthy();
+    expect(screen.getByText("Sending the job description…")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Create a role" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Draft rubric" })).toBeNull();
+    expect(screen.getByText("Senior backend · Stripe")).toBeTruthy();
+
+    finishDraft({
+      criteria: [],
+      omitted: [],
+      usage: { inputTokens: 0, outputTokens: 0 },
+      cost: { totalUsd: 0 },
+    });
+  });
+
+  it("returns to the form with the job description after a late draft failure", async () => {
+    const user = userEvent.setup();
+    let failDraft: (error: unknown) => void = () => undefined;
+    const draftRubric = vi.fn(
+      () =>
+        new Promise<never>((_resolve, reject) => {
+          failDraft = reject;
+        }),
+    );
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    expect(await screen.findByRole("heading", { name: "Drafting this rubric" })).toBeTruthy();
+    failDraft(new ApiError(502, { error: "llm_failed" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The connected model did not finish a rubric. Nothing was sent to Jev. Wait and try again.",
+        ),
+      ).toBeTruthy();
+    });
+    expect(screen.getByRole("heading", { name: "Create a role" })).toBeTruthy();
+    expect((screen.getByLabelText("Job description") as HTMLTextAreaElement).value).toContain("requirement0");
+  });
+
   it("explains when the connected model fails to draft", async () => {
     const user = userEvent.setup();
     const onDrafted = vi.fn();
@@ -268,6 +347,8 @@ describe("RoleScreen", () => {
     });
     expect(onDrafted).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Create a role" })).toBeTruthy();
+    expect((screen.getByLabelText("Job description") as HTMLTextAreaElement).value).toContain("requirement0");
+    expect(screen.queryByRole("heading", { name: "Drafting this rubric" })).toBeNull();
   });
 
   it("explains when ChatGPT rejects the draft instead of a generic failure", async () => {
@@ -609,6 +690,33 @@ describe("EvaluatingScreen", () => {
       expect(screen.queryByText("The language model is answering the same questions…")).toBeNull();
       vi.advanceTimersByTime(2500);
     }
+    vi.useRealTimers();
+  });
+
+  it("shows draft copy when drafting a rubric", () => {
+    render(<EvaluatingScreen mode="draft" />);
+
+    expect(screen.getByRole("progressbar", { name: "Drafting" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Drafting this rubric" })).toBeTruthy();
+    expect(screen.getByText("Sending the job description…")).toBeTruthy();
+    expect(screen.getByText("This can take up to a minute.")).toBeTruthy();
+    expect(screen.getByText("Jev does not write the rubric.")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Evaluating this profile" })).toBeNull();
+  });
+
+  it("rotates draft status lines", () => {
+    vi.useFakeTimers();
+    render(<EvaluatingScreen mode="draft" />);
+    expect(screen.getByText("Sending the job description…")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText("The connected model is drafting criteria…")).toBeTruthy();
+    act(() => {
+      vi.advanceTimersByTime(2500);
+    });
+    expect(screen.getByText("Building the rubric…")).toBeTruthy();
     vi.useRealTimers();
   });
 });
