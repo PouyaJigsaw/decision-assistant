@@ -713,7 +713,7 @@ const evaluateBody = z.object({
   rubricVersionId: z.string().min(1),
   approvedText: z.string().trim().min(1),
   keepExtracts: z.boolean(),
-  comparisonEnabled: z.boolean().default(true),
+  comparisonEnabled: z.boolean().default(false),
   candidateName: z.string().optional(),
 });
 

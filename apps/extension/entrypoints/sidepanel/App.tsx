@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { parseJobPosting } from "@decision-assistant/domain";
 import { API_BASE_URL, ApiError, chromeTokenStore, createApi } from "../../src/api";
 import { pickCaptureTab } from "../../src/capture-tab";
-import { CHATGPT_USAGE_URL, createChromeOAuthHost, loadChatGptAuth } from "../../src/chatgpt-oauth";
+import {
+  CHATGPT_USAGE_URL,
+  chatgptSignInErrorCopy,
+  chromeLocalKv,
+  createChromeOAuthHost,
+  disconnectChatGpt,
+  loadChatGptAuth,
+  signInWithChatGpt,
+} from "../../src/chatgpt-oauth";
 import { extractSections } from "../../src/extract";
 import {
   chromeDualKv,
@@ -11,17 +19,16 @@ import {
   setSessionApiKey,
   type Connection,
 } from "../../src/llm-credentials";
-import { OpenAiError, listModels, type ListedModel } from "../../src/openai-responses";
+import { type ListedModel } from "../../src/openai-responses";
 import { readDocument } from "../../src/read-document";
 import { roleHeading } from "../../src/copy";
-import { completeCompare, completeDraft, selectedModel, setSelectedModel } from "../../src/user-llm";
+import { approvedExtractText, type ExtractSection } from "../../src/payload";
+import { completeDraft, resolvePlanModel, selectedModel, setSelectedModel } from "../../src/user-llm";
 import { billingCopy, ConnectionScreen } from "./ConnectionScreen";
 import { DashboardScreen } from "./DashboardScreen";
 import { ErrorScreen, type PanelError } from "./ErrorScreen";
 import { EvaluatingScreen } from "./EvaluatingScreen";
 import { HistoryScreen, type HistoryRow } from "./HistoryScreen";
-import { PanelHeader } from "./PanelHeader";
-import { PreviewScreen, type ExtractSection } from "./PreviewScreen";
 import { ResultScreen, type ResultEvaluation } from "./ResultScreen";
 import { RoleScreen, type DraftRequest, type DraftResult } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
@@ -40,7 +47,6 @@ type Screen =
   | "role"
   | "rubric"
   | "sitting"
-  | "preview"
   | "evaluating"
   | "result"
   | "error"
@@ -84,7 +90,17 @@ function asExtract(value: unknown): { url: string; sections: ExtractSection[]; c
   return null;
 }
 
+type ExtractRecord = { url: string; sections: ExtractSection[]; candidateName?: string };
 type RoleRecord = { id: string; title: string; company?: string; summary?: string; notes?: string };
+
+function evaluateBodyFrom(extract: ExtractRecord): EvaluateBody {
+  return {
+    approvedText: approvedExtractText(extract.sections),
+    comparisonEnabled: false,
+    keepExtracts: false,
+    candidateName: candidateNameFromExtract(extract),
+  };
+}
 
 function asRole(value: unknown): RoleRecord | null {
   if (!value || typeof value !== "object") return null;
@@ -129,9 +145,7 @@ export function App() {
   const [draft, setDraft] = useState<DraftResult | null>(null);
   const [criteria, setCriteria] = useState<DraftResult["criteria"]>([]);
   const [rubricId, setRubricId] = useState<string | null>(null);
-  const [extract, setExtract] = useState<{ url: string; sections: ExtractSection[]; candidateName?: string } | null>(
-    null,
-  );
+  const [extract, setExtract] = useState<ExtractRecord | null>(null);
   const [evaluation, setEvaluation] = useState<ResultEvaluation | null>(null);
   const [panelError, setPanelError] = useState<PanelError | null>(null);
   const [usesRemaining, setUsesRemaining] = useState<number | null | undefined>();
@@ -150,6 +164,12 @@ export function App() {
   const [totals, setTotals] = useState({ jevUsd: 0, llmUsd: 0 });
   const [dashboardError, setDashboardError] = useState<string | undefined>();
   const [connection, setConnection] = useState<Connection>({ kind: "none" });
+  const roleRef = useRef(role);
+  const rubricIdRef = useRef(rubricId);
+  const criteriaRef = useRef(criteria);
+  roleRef.current = role;
+  rubricIdRef.current = rubricId;
+  criteriaRef.current = criteria;
   const [models, setModels] = useState<ListedModel[]>([]);
   const [modelSlug, setModelSlug] = useState("gpt-5.4");
   const [showWelcome, setShowWelcome] = useState(false);
@@ -183,14 +203,13 @@ export function App() {
   async function refreshConnection() {
     const next = await getConnection(kv);
     setConnection(next);
-    setModelSlug(await selectedModel(kv));
     if (next.kind === "chatgpt" && next.planUsage) {
       const stored = await chrome.storage.local.get("chatgptPlanWelcomed");
       setShowWelcome(!stored.chatgptPlanWelcomed);
       try {
         const auth = await loadChatGptAuth(kv.local);
         if (auth?.access_token) {
-          setModels(await listModels({ token: auth.access_token, planUsage: true }));
+          setModels(await resolvePlanModel(kv, { token: auth.access_token }));
         }
       } catch {
         setModels([]);
@@ -199,6 +218,7 @@ export function App() {
       setShowWelcome(false);
       setModels([]);
     }
+    setModelSlug(await selectedModel(kv));
   }
 
   function needsModel(): boolean {
@@ -235,16 +255,6 @@ export function App() {
       const next = asExtract(changes.extract?.newValue);
       if (!next) return;
       setExtract(next);
-      setScreen((current) =>
-        current === "signin" ||
-        current === "boot" ||
-        current === "role" ||
-        current === "rubric" ||
-        current === "dashboard" ||
-        current === "sitting"
-          ? current
-          : "preview",
-      );
     }
     chrome.storage.session.onChanged.addListener(onExtractChanged);
     return () => chrome.storage.session.onChanged.removeListener(onExtractChanged);
@@ -252,37 +262,22 @@ export function App() {
 
   const runEvaluate = useCallback(
     async (body: EvaluateBody, key: string) => {
-      if (!role || !rubricId) throw new Error("missing rubric");
-      if (body.comparisonEnabled && needsModel()) {
-        setScreen("connection");
-        return;
-      }
+      const currentRole = roleRef.current;
+      const currentRubricId = rubricIdRef.current;
+      if (!currentRole || !currentRubricId) throw new Error("missing rubric");
       setScreen("evaluating");
       try {
         const result = (await api.evaluate({
-          roleId: role.id,
-          rubricVersionId: rubricId,
+          roleId: currentRole.id,
+          rubricVersionId: currentRubricId,
           idempotencyKey: key,
           ...body,
           candidateName: body.candidateName ?? candidateNameFromExtract(extract),
-        })) as ResultEvaluation & { comparison?: { instructions: string; input: string } };
-        let next = result;
-        if (result.comparison) {
-          try {
-            const completion = await completeCompare(kv, oauthHost, criteria, body.approvedText);
-            next = (await api.postComparison(result.id, completion)) as ResultEvaluation;
-          } catch (error) {
-            if (error instanceof OpenAiError && error.manageUsage) {
-              setPanelError({ status: error.status, body: { error: error.code } });
-              setScreen("error");
-              return;
-            }
-          }
-        }
-        setEvaluation(withLabels(next, criteria));
+        })) as ResultEvaluation;
+        setEvaluation(withLabels(result, criteriaRef.current));
         setOpenedFromHistory(false);
         setOpenedFromDashboard(false);
-        setUsesRemaining(next.usesRemaining);
+        setUsesRemaining(result.usesRemaining);
         setEvalKey(null);
         setScreen("result");
       } catch (error) {
@@ -297,7 +292,7 @@ export function App() {
         setScreen("error");
       }
     },
-    [role, rubricId, criteria, extract, connection],
+    [extract],
   );
 
   const roleApi = useMemo(
@@ -337,6 +332,8 @@ export function App() {
         const approved = await api.approveRubric(role.id, next);
         setCriteria(next);
         setRubricId(approved.id);
+        criteriaRef.current = next;
+        rubricIdRef.current = approved.id;
         await chrome.storage.session.set({ panelRubricId: approved.id, panelCriteria: next });
         return approved;
       },
@@ -344,16 +341,16 @@ export function App() {
     [role],
   );
 
-  const previewApi = useMemo(
-    () => ({
-      async evaluate(body: EvaluateBody) {
-        const key = evalKey ?? crypto.randomUUID();
-        setEvalKey(key);
-        setEvalBody(body);
-        await runEvaluate(body, key);
-      },
-    }),
-    [evalKey, runEvaluate],
+  const startEvaluate = useCallback(
+    (target: ExtractRecord) => {
+      if (!roleRef.current || !rubricIdRef.current) return;
+      const body = evaluateBodyFrom(target);
+      const key = crypto.randomUUID();
+      setEvalKey(key);
+      setEvalBody(body);
+      void runEvaluate(body, key);
+    },
+    [runEvaluate],
   );
 
   async function loadExtract() {
@@ -363,7 +360,7 @@ export function App() {
     return next;
   }
 
-  async function captureFromActiveTab() {
+  async function captureFromActiveTab(): Promise<ExtractRecord | null> {
     setCaptureError(undefined);
     try {
       const tabs = await chrome.tabs.query({ lastFocusedWindow: true });
@@ -387,10 +384,10 @@ export function App() {
       };
       setExtract(next);
       await chrome.storage.session.set({ extract: { ...next, capturedAt: Date.now() } });
-      return true;
+      return next;
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : String(error));
-      return false;
+      return null;
     }
   }
 
@@ -463,7 +460,11 @@ export function App() {
 
   async function continueSitting() {
     const next = await loadExtract();
-    setScreen(next ? "preview" : "sitting");
+    if (next) {
+      startEvaluate(next);
+      return;
+    }
+    setScreen("sitting");
   }
 
   function editJobDescription(from: "sitting" | "dashboard" = "sitting") {
@@ -472,8 +473,8 @@ export function App() {
     setScreen("role");
   }
 
-  function backFromExtract() {
-    setScreen(extract ? "preview" : "sitting");
+  function backToSitting() {
+    setScreen("sitting");
   }
 
   async function signOut() {
@@ -487,10 +488,9 @@ export function App() {
   }
 
   function recaptureFromResult() {
-    void captureFromActiveTab().then((ok) => {
-      if (!ok) return;
-      clearEvaluation();
-      setScreen("preview");
+    void captureFromActiveTab().then((next) => {
+      if (!next) return;
+      startEvaluate(next);
     });
   }
 
@@ -505,18 +505,19 @@ export function App() {
         error={connectionError}
         onConnectChatGpt={async () => {
           setConnectionError(undefined);
-          const response = (await chrome.runtime.sendMessage({ type: "chatgpt-signin" })) as
-            | { ok: true }
-            | { ok: false; error?: string };
-          if (!response?.ok) {
-            setConnectionError(response?.error === "access_denied" ? "ChatGPT plan usage was not enabled." : "ChatGPT sign-in failed.");
+          try {
+            await signInWithChatGpt(oauthHost, chromeLocalKv());
+          } catch (error) {
+            setConnectionError(
+              chatgptSignInErrorCopy(error instanceof Error ? error.message : "oauth_failed"),
+            );
             await refreshConnection();
             return;
           }
           await refreshConnection();
         }}
         onDisconnect={async () => {
-          await chrome.runtime.sendMessage({ type: "chatgpt-disconnect" });
+          await disconnectChatGpt(oauthHost, chromeLocalKv());
           await refreshConnection();
         }}
         onSaveKey={async (key) => {
@@ -644,7 +645,10 @@ export function App() {
         roleTitle={roleHeading(role?.title, role?.company) || role?.title}
         api={rubricApi}
         onApproved={() => {
-          void loadExtract().then((next) => setScreen(next ? "preview" : "sitting"));
+          void loadExtract().then((next) => {
+            if (next) startEvaluate(next);
+            else setScreen("sitting");
+          });
         }}
         onChangeJob={() => editJobDescription(roleFrom)}
         onBack={() => setScreen("role")}
@@ -659,8 +663,8 @@ export function App() {
         jobDescription={jobDescriptionFor(role, jobNotes)}
         criteria={criteria}
         onReadTab={() => {
-          void captureFromActiveTab().then((ok) => {
-            if (ok) setScreen("preview");
+          void captureFromActiveTab().then((next) => {
+            if (next) startEvaluate(next);
           });
         }}
         onChangeJob={() => editJobDescription("sitting")}
@@ -669,40 +673,8 @@ export function App() {
       />
     );
   }
-  if (screen === "preview") {
-    if (!extract) {
-      return (
-        <SittingScreen
-          roleTitle={role?.title ?? "Role"}
-          company={role?.company}
-          jobDescription={jobDescriptionFor(role, jobNotes)}
-          criteria={criteria}
-          onReadTab={() => {
-            void captureFromActiveTab();
-          }}
-          onChangeJob={() => editJobDescription("sitting")}
-          onBack={() => void enterDashboard()}
-          captureError={captureError}
-        />
-      );
-    }
-    return (
-      <PreviewScreen
-        url={extract.url}
-        roleTitle={roleHeading(role?.title, role?.company) || role?.title || ""}
-        sections={extract.sections}
-        api={previewApi}
-        onEvaluated={() => undefined}
-        onRecapture={() => void captureFromActiveTab()}
-        onChangeJob={() => editJobDescription("sitting")}
-        onBack={() => setScreen("sitting")}
-        captureError={captureError}
-        billing={billingCopy(connection)}
-      />
-    );
-  }
   if (screen === "evaluating") {
-    return <EvaluatingScreen roleTitle={roleHeading(role?.title, role?.company) || role?.title} onBack={backFromExtract} />;
+    return <EvaluatingScreen roleTitle={roleHeading(role?.title, role?.company) || role?.title} onBack={backToSitting} />;
   }
   if (screen === "error" && panelError) {
     return (
@@ -710,7 +682,7 @@ export function App() {
         error={panelError}
         usesRemaining={usesRemaining}
         cap={trialCap}
-        onBack={backFromExtract}
+        onBack={backToSitting}
         onManageUsage={() => {
           void chrome.tabs.create({ url: CHATGPT_USAGE_URL });
         }}
@@ -734,8 +706,7 @@ export function App() {
           saveNote: (id, notes) => api.saveNote(id, notes),
         }}
         onRetry={() => {
-          clearEvaluation();
-          setScreen("preview");
+          if (extract) startEvaluate(extract);
         }}
         onRecapture={recaptureFromResult}
         onChangeJob={() => void startNewJob()}
@@ -749,6 +720,9 @@ export function App() {
                 setScreen("history");
               }
         }
+        onHome={() => {
+          void enterDashboard();
+        }}
         onBack={() => {
           if (openedFromDashboard) {
             void enterDashboard();
@@ -758,7 +732,7 @@ export function App() {
             setScreen("history");
             return;
           }
-          backFromExtract();
+          backToSitting();
         }}
       />
     );
@@ -777,7 +751,7 @@ export function App() {
             setTrialCap(me.cap ?? null);
           },
         }}
-        onBack={() => setScreen(historyFrom === "dashboard" ? "dashboard" : evaluation ? "result" : "preview")}
+        onBack={() => setScreen(historyFrom === "dashboard" ? "dashboard" : evaluation ? "result" : "sitting")}
         onOpen={(id) => {
           void api.getEvaluation(id).then((row) => {
             setEvaluation(withLabels(row as ResultEvaluation, criteria));

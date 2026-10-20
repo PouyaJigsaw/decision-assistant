@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { ApiError } from "../../src/api";
 import { PRODUCT_NAME, roleHeading } from "../../src/copy";
+import { OpenAiError } from "../../src/openai-responses";
 import { PanelHeader } from "./PanelHeader";
 
 export type DraftResult = {
@@ -75,7 +76,7 @@ export function RoleScreen({
       <div>
         <h2>Create a role</h2>
         <p className="lede">
-          Paste a job description. The comparison model drafts an editable rubric. Jev does not write text.
+          Paste a job description. The connected model drafts an editable rubric. Jev does not write text.
         </p>
         {billing ? <p className="lede">{billing}</p> : null}
       </div>
@@ -105,6 +106,12 @@ function draftErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message === "llm_not_connected") {
     return "Connect ChatGPT or an API key to draft a rubric.";
   }
+  if (error instanceof OpenAiError) {
+    if (error.manageUsage) {
+      return "Usage limit reached. Review the plan or app limit in ChatGPT settings.";
+    }
+    return `The connected model did not finish a rubric (${error.detail || error.code}). Nothing was sent to Jev. Wait and try again.`;
+  }
   if (error instanceof ApiError) {
     const code =
       error.body && typeof error.body === "object" && "error" in error.body
@@ -114,7 +121,7 @@ function draftErrorMessage(error: unknown): string {
       return INSUFFICIENT_JOB_DESCRIPTION;
     }
     if (code === "llm_failed" || error.status === 502) {
-      return "The comparison model did not finish a rubric. Nothing was sent to Jev. Wait and try again.";
+      return "The connected model did not finish a rubric. Nothing was sent to Jev. Wait and try again.";
     }
     if (code === "llm_not_connected") {
       return "Connect ChatGPT or an API key to draft a rubric.";
@@ -125,6 +132,13 @@ function draftErrorMessage(error: unknown): string {
     if (error.status === 401) {
       return "Sign in expired. Sign in again, then draft the rubric.";
     }
+    return `Could not draft the rubric (${code || error.status}). The job description is still here — try again.`;
+  }
+  if (error instanceof TypeError) {
+    return "Could not reach ChatGPT or the API. Check the connection and try again.";
+  }
+  if (error instanceof Error && error.message) {
+    return `Could not draft the rubric (${error.message}). The job description is still here — try again.`;
   }
   return "Could not draft the rubric. The job description is still here — try again.";
 }

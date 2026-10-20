@@ -2,8 +2,9 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { JEV_PRICE, costFromUsage } from "@decision-assistant/domain";
+import { JEV_PRICE, costFromUsage, formatUsd } from "@decision-assistant/domain";
 import { ApiError } from "../../src/api";
+import { OpenAiError } from "../../src/openai-responses";
 import { DashboardScreen } from "./DashboardScreen";
 import { SittingScreen } from "./SittingScreen";
 import { ErrorScreen } from "./ErrorScreen";
@@ -11,7 +12,6 @@ import { EvaluatingScreen } from "./EvaluatingScreen";
 import { HistoryScreen } from "./HistoryScreen";
 import { PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
-import { PreviewScreen } from "./PreviewScreen";
 import { ResultScreen } from "./ResultScreen";
 import { RoleScreen } from "./RoleScreen";
 import { RubricScreen } from "./RubricScreen";
@@ -46,12 +46,6 @@ describe("PanelHeader", () => {
 function enoughJobDescription() {
   return Array.from({ length: 150 }, (_, index) => `requirement${index}`).join(" ");
 }
-
-const previewSections = [
-  { id: "headline", title: "Headline", text: "Staff engineer" },
-  { id: "about", title: "About", text: "Builds Go services" },
-  { id: "experience", title: "Experience", text: "four years" },
-];
 
 describe("SignInScreen", () => {
   it("shows the product name", () => {
@@ -146,6 +140,9 @@ describe("ConnectionScreen", () => {
       />,
     );
     expect(screen.getByText("You’re using your ChatGPT plan")).toBeTruthy();
+    expect(
+      screen.getByText("Eligible draft requests use your ChatGPT plan. Manage usage in ChatGPT settings."),
+    ).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Got it" }));
     expect(onDismissWelcome).toHaveBeenCalled();
     expect(screen.getAllByText("Using ChatGPT plan").length).toBeGreaterThan(0);
@@ -169,6 +166,9 @@ describe("RoleScreen", () => {
     render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
 
     expect(document.querySelector("img.brand-mark")).toBeTruthy();
+    expect(
+      screen.getByText("Paste a job description. The connected model drafts an editable rubric. Jev does not write text."),
+    ).toBeTruthy();
     const notes = enoughJobDescription();
     await user.click(screen.getByLabelText("Role name"));
     await user.paste("Forward Deployed Engineer");
@@ -242,7 +242,7 @@ describe("RoleScreen", () => {
     expect((screen.getByRole("button", { name: "Draft rubric" }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("explains when the comparison model fails to draft", async () => {
+  it("explains when the connected model fails to draft", async () => {
     const user = userEvent.setup();
     const onDrafted = vi.fn();
     const draftRubric = vi.fn(async () => {
@@ -262,12 +262,68 @@ describe("RoleScreen", () => {
     await waitFor(() => {
       expect(
         screen.getByText(
-          "The comparison model did not finish a rubric. Nothing was sent to Jev. Wait and try again.",
+          "The connected model did not finish a rubric. Nothing was sent to Jev. Wait and try again.",
         ),
       ).toBeTruthy();
     });
     expect(onDrafted).not.toHaveBeenCalled();
     expect(screen.getByRole("heading", { name: "Create a role" })).toBeTruthy();
+  });
+
+  it("explains when ChatGPT rejects the draft instead of a generic failure", async () => {
+    const user = userEvent.setup();
+    const draftRubric = vi.fn(async () => {
+      throw new OpenAiError("openai_failed", 400, false);
+    });
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The connected model did not finish a rubric (openai_failed). Nothing was sent to Jev. Wait and try again.",
+        ),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByText("Could not draft the rubric. The job description is still here — try again.")).toBeNull();
+  });
+
+  it("shows the OpenAI detail instead of a bare openai_failed code", async () => {
+    const user = userEvent.setup();
+    const draftRubric = vi.fn(async () => {
+      throw new OpenAiError(
+        "openai_failed",
+        400,
+        false,
+        "The model `gpt-5.4` does not exist or you do not have access to it.",
+      );
+    });
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "The connected model did not finish a rubric (The model `gpt-5.4` does not exist or you do not have access to it.). Nothing was sent to Jev. Wait and try again.",
+        ),
+      ).toBeTruthy();
+    });
   });
 });
 
@@ -299,9 +355,9 @@ describe("RubricScreen", () => {
     expect(screen.getByText("Omitted: age")).toBeTruthy();
     expect(screen.getByText("Forward Deployed Engineer · AIM")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Change job description" })).toBeTruthy();
+
     expect(screen.getByText("Review the questions and what counts as evidence. Missing information will be marked Not sure.")).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Importance" })).toBeTruthy();
-
     await user.clear(screen.getByDisplayValue("Is there evidence of Go?"));
     await user.type(screen.getByLabelText("Screening question and evidence guidance"), "edited prompt");
     await user.click(screen.getByRole("button", { name: "Approve rubric" }));
@@ -323,103 +379,6 @@ describe("RubricScreen", () => {
         criteria={[{ id: "go", kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" }]}
         api={{ approveRubric: async () => undefined }}
         onApproved={() => undefined}
-        onChangeJob={onChangeJob}
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Change job description" }));
-    expect(onChangeJob).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("PreviewScreen", () => {
-  afterEach(() => {
-    cleanup();
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it("uploads only kept sections after confirm", async () => {
-    const user = userEvent.setup();
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input).includes("/v1/evaluations")) {
-        return new Response(JSON.stringify({ id: "e1" }), { status: 200 });
-      }
-      throw new Error(`unexpected ${String(input)}`);
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const evaluate = vi.fn(async (body: { approvedText: string }) => {
-      await fetch("http://127.0.0.1:8787/v1/evaluations", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      return body;
-    });
-
-    render(
-      <PreviewScreen
-        url="https://www.linkedin.com/in/alex"
-        roleTitle="Senior backend"
-        sections={previewSections}
-        api={{ evaluate }}
-        onEvaluated={() => undefined}
-      />,
-    );
-
-    expect(screen.getByText("Nothing is uploaded until you confirm.")).toBeTruthy();
-    expect(
-      screen.getByText(
-        "Confirming Evaluate sends the approved text to the server, then to Jev and the language model. Nothing is messaged to the candidate.",
-      ),
-    ).toBeTruthy();
-    expect(screen.getByRole("checkbox", { name: "Also run direct LLM" })).toHaveProperty("checked", true);
-    expect(screen.getByRole("checkbox", { name: "Keep extracts on the server" })).toHaveProperty("checked", false);
-    expect(fetchMock).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Remove About" }));
-    await user.click(screen.getByRole("button", { name: "Evaluate" }));
-
-    expect(evaluate).toHaveBeenCalledTimes(1);
-    const payload = evaluate.mock.calls[0]?.[0] as { approvedText: string };
-    expect(payload.approvedText).toContain("Staff engineer");
-    expect(payload.approvedText).toContain("four years");
-    expect(payload.approvedText).not.toContain("Builds Go services");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/evaluations");
-  });
-
-  it("lets the recruiter read the focused tab again", async () => {
-    const user = userEvent.setup();
-    const onRecapture = vi.fn();
-
-    render(
-      <PreviewScreen
-        url="https://www.linkedin.com/in/wrong"
-        roleTitle="Senior backend"
-        sections={previewSections}
-        api={{ evaluate: async () => undefined }}
-        onEvaluated={() => undefined}
-        onRecapture={onRecapture}
-        captureError="Could not read that tab"
-      />,
-    );
-
-    await user.click(screen.getByRole("button", { name: "Read this tab" }));
-    expect(onRecapture).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("Could not read that tab")).toBeTruthy();
-  });
-
-  it("lets the recruiter start a new job description", async () => {
-    const user = userEvent.setup();
-    const onChangeJob = vi.fn();
-
-    render(
-      <PreviewScreen
-        url="https://www.linkedin.com/in/one"
-        roleTitle="Senior backend"
-        sections={previewSections}
-        api={{ evaluate: async () => undefined }}
-        onEvaluated={() => undefined}
         onChangeJob={onChangeJob}
       />,
     );
@@ -487,25 +446,24 @@ describe("ResultScreen", () => {
         "Yes = the profile supports it. No = the profile explicitly contradicts it. Not sure = missing, conflicting, or inconclusive. Certain = the policy will use this call.",
       ),
     ).toBeTruthy();
-    expect(screen.getAllByText("Jev").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("LLM").length).toBeGreaterThan(0);
     expect(screen.getByText("– Not sure")).toBeTruthy();
     expect(screen.getByText("Not mentioned in the profile.")).toBeTruthy();
     expect(screen.getByText("Unsure of this call · 0.44")).toBeTruthy();
-    expect(screen.getByText("✓ Yes")).toBeTruthy();
-    expect(screen.getByText("Certain of this call · 0.91")).toBeTruthy();
+    expect(screen.queryByText("✓ Yes")).toBeNull();
+    expect(screen.queryByText("LLM")).toBeNull();
+    expect(screen.queryByText("Led the payments API in Go for four years.")).toBeNull();
     expect(screen.queryByRole("meter")).toBeNull();
     expect(screen.getByText("– Not sure").className).toMatch(/chip-no_evidence/);
     expect(screen.getByText("– Not sure").className).toMatch(/chip-unsure/);
-    expect(screen.getByText("✓ Yes").className).toMatch(/chip-match/);
-    expect(screen.getByText("Led the payments API in Go for four years.")).toBeTruthy();
     expect(screen.getByText("Tim Glaser · evaluated for Senior backend")).toBeTruthy();
     expect(screen.getByRole("heading", { name: "This run" })).toBeTruthy();
-    expect(screen.getByText("Total $0.014")).toBeTruthy();
+    expect(screen.getByText(`Total ${formatUsd(jevCost.totalUsd)}`)).toBeTruthy();
     expect(screen.getByText("Read 2,180 tokens")).toBeTruthy();
     expect(screen.getByText("Reported 36 · not billed")).toBeTruthy();
-    expect(screen.getByText("Read 412 tokens")).toBeTruthy();
-    expect(screen.getByText("Written 88 · on your account")).toBeTruthy();
+    expect(screen.queryByText("Read 412 tokens")).toBeNull();
+    expect(screen.queryByText("Written 88 · on your account")).toBeNull();
+    expect(screen.queryByText("Most of the cost is the language model.")).toBeNull();
+    expect(screen.queryByText(/of spend/)).toBeNull();
     expect(screen.getByText("Jev does not write text. Its output tokens are counted and not billed.")).toBeTruthy();
     expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
   });
@@ -546,8 +504,8 @@ describe("ResultScreen", () => {
     expect(screen.getByText(/Evidence to look for:/).className).toBe("evidence-guidance");
     expect(screen.getByText("× Yes").className).toMatch(/chip-mismatch/);
     expect(screen.getByText("The exclusion condition is present.")).toBeTruthy();
-    expect(screen.getByText("– Not sure").className).toMatch(/chip-no_evidence/);
-    expect(screen.getByText("Not mentioned in the profile.")).toBeTruthy();
+    expect(screen.queryByText("– Not sure")).toBeNull();
+    expect(screen.queryByText("LLM")).toBeNull();
     expect(screen.getByText("0 of 1 criteria confirmed.")).toBeTruthy();
   });
 });
@@ -564,7 +522,7 @@ describe("ErrorScreen", () => {
     expect(screen.getByText("Evaluation failed")).toBeTruthy();
     expect(
       screen.getByText(
-        "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.",
+        "Jev did not return a valid decision. No recommendation was saved.",
       ),
     ).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Investigate" })).toBeNull();
@@ -613,7 +571,7 @@ describe("ErrorScreen", () => {
     expect(screen.getByText("Today's spend limit is reached. Evaluate is closed.")).toBeTruthy();
     expect(
       screen.queryByText(
-        "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.",
+        "Jev did not return a valid decision. No recommendation was saved.",
       ),
     ).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
@@ -642,6 +600,16 @@ describe("EvaluatingScreen", () => {
     expect(screen.getByRole("heading", { name: "Evaluating this profile" })).toBeTruthy();
     expect(screen.getByText("Sending the approved profile…")).toBeTruthy();
     expect(screen.getByText("Nothing is messaged to the candidate.")).toBeTruthy();
+  });
+
+  it("does not wait on a comparison model", () => {
+    vi.useFakeTimers();
+    render(<EvaluatingScreen />);
+    for (let i = 0; i < 6; i++) {
+      expect(screen.queryByText("The language model is answering the same questions…")).toBeNull();
+      vi.advanceTimersByTime(2500);
+    }
+    vi.useRealTimers();
   });
 });
 
@@ -689,7 +657,7 @@ describe("HistoryScreen", () => {
     expect(onBack).toHaveBeenCalledTimes(1);
   });
 
-  it("shows stored totals, LLM off, and does not increment remaining on delete", async () => {
+  it("shows stored Jev totals and does not increment remaining on delete", async () => {
     const user = userEvent.setup();
     const list = vi.fn(async () => historyRows);
     const deleteAll = vi.fn(async () => {
@@ -700,13 +668,14 @@ describe("HistoryScreen", () => {
 
     expect(await screen.findByText("Running total")).toBeTruthy();
     expect(screen.getByText("Jev $0.0004")).toBeTruthy();
-    expect(screen.getByText("LLM $0.041")).toBeTruthy();
+    expect(screen.queryByText("LLM $0.041")).toBeNull();
     expect(screen.getByText("Totals use the price stored with each run.")).toBeTruthy();
     expect(screen.getByText("Investigate")).toBeTruthy();
     expect(screen.getByText("Tim Glaser · evaluated for Senior backend")).toBeTruthy();
     expect(screen.getByText("Evaluated for Staff")).toBeTruthy();
-    expect(screen.getByText("Jev $0.00009 · LLM $0.014")).toBeTruthy();
-    expect(screen.getByText("Jev $0.00009 · LLM off")).toBeTruthy();
+    expect(screen.getAllByText("Jev $0.00009")).toHaveLength(2);
+    expect(screen.queryByText("Jev $0.00009 · LLM $0.014")).toBeNull();
+    expect(screen.queryByText("Jev $0.00009 · LLM off")).toBeNull();
     expect(screen.getByText("Uses remaining: 0 of 3")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Delete all history" }));
@@ -749,23 +718,6 @@ describe("HistoryScreen", () => {
 });
 
 describe("keyboard path", () => {
-  it("keeps preview extract controls in tab order", () => {
-    render(
-      <PreviewScreen
-        url="https://example.com"
-        roleTitle="Role"
-        sections={previewSections}
-        api={{ evaluate: async () => undefined }}
-        onEvaluated={() => undefined}
-      />,
-    );
-
-    for (const name of ["Remove Headline", "Remove About", "Remove Experience", "Also run direct LLM", "Keep extracts on the server", "Evaluate"]) {
-      const role = name.startsWith("Also") || name.startsWith("Keep") ? "checkbox" : "button";
-      expect(screen.getByRole(role, { name }).tabIndex).not.toBe(-1);
-    }
-  });
-
   it("retries from the result screen", async () => {
     const user = userEvent.setup();
     const onRetry = vi.fn();
@@ -798,9 +750,10 @@ describe("keyboard path", () => {
     expect(onChangeJob).toHaveBeenCalledTimes(1);
   });
 
-  it("returns via header Back and does not expose a footer Back to history", async () => {
+  it("returns via header Back and offers Home at the end of the result", async () => {
     const user = userEvent.setup();
     const onBack = vi.fn();
+    const onHome = vi.fn();
     render(
       <ResultScreen
         evaluation={{
@@ -816,14 +769,18 @@ describe("keyboard path", () => {
         api={{ saveNote: async () => undefined }}
         onRetry={() => undefined}
         onBack={onBack}
+        onHome={onHome}
       />,
     );
 
     expect(screen.queryByRole("button", { name: "Back to history" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Back to dashboard" })).toBeNull();
+    const buttons = screen.getAllByRole("button");
+    expect(buttons.at(-1)?.textContent).toBe("Home");
+    await user.click(screen.getByRole("button", { name: "Home" }));
+    expect(onHome).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(onBack).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 });
 
@@ -867,6 +824,8 @@ describe("DashboardScreen", () => {
     );
 
     expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
+    expect(screen.getByText("Jev $0.0004")).toBeTruthy();
+    expect(screen.queryByText("LLM $0.041")).toBeNull();
     await user.click(screen.getByRole("button", { name: "New job description" }));
     expect(onNewJob).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();

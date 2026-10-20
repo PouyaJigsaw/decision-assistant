@@ -28,7 +28,7 @@ function errorMessage(error: PanelError) {
   ) {
     return "Usage limit reached. Review the plan or app limit in ChatGPT settings.";
   }
-  return "Jev did not return a valid decision. No recommendation was saved, and the comparison was not shown.";
+  return "Jev did not return a valid decision. No recommendation was saved.";
 }
 
 export function ErrorScreen({

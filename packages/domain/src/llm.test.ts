@@ -24,6 +24,9 @@ describe("draftLlmRequest", () => {
     expect(DRAFT_INSTRUCTIONS).toContain("Has this person");
     expect(DRAFT_INSTRUCTIONS).toContain("Evidence to look for:");
     expect(DRAFT_INSTRUCTIONS).toContain("passionate");
+    expect(DRAFT_INSTRUCTIONS).toContain("yes/no");
+    expect(DRAFT_INSTRUCTIONS).not.toContain("Keep seniority as a placement question");
+    expect(DRAFT_INSTRUCTIONS).not.toContain('"seniority"');
     expect(DRAFT_INSTRUCTIONS).not.toContain("Synopsys");
   });
 });
@@ -50,11 +53,11 @@ describe("parseDraftCompletion", () => {
   it("reads criteria from JSON text, including a fenced block", () => {
     expect(
       parseDraftCompletion(
-        '{"criteria":[{"kind":"requirement","label":"Go","prompt":"Five years of Go?"}]}',
+        '{"criteria":[{"kind":"requirement","label":"Go","prompt":"Does this person have at least five years of Go?"}]}',
       ),
     ).toEqual({
       ok: true,
-      criteria: [{ kind: "requirement", label: "Go", prompt: "Five years of Go?" }],
+      criteria: [{ kind: "requirement", label: "Go", prompt: "Does this person have at least five years of Go?" }],
     });
     const screening =
       "Has this person investigated issues reported by QA?\nEvidence to look for: a described investigation and the fix.";
@@ -68,12 +71,41 @@ describe("parseDraftCompletion", () => {
     });
     expect(
       parseDraftCompletion(
-        '```json\n{"criteria":[{"kind":"preference","label":"Systems","prompt":"Distributed work?"}]}\n```',
+        '```json\n{"criteria":[{"kind":"preference","label":"Systems","prompt":"Has this person done distributed-systems work?"}]}\n```',
       ),
     ).toEqual({
       ok: true,
-      criteria: [{ kind: "preference", label: "Systems", prompt: "Distributed work?" }],
+      criteria: [{ kind: "preference", label: "Systems", prompt: "Has this person done distributed-systems work?" }],
     });
+  });
+
+  it("rejects seniority and open-ended questions", () => {
+    expect(
+      parseDraftCompletion(
+        JSON.stringify({
+          criteria: [{ kind: "seniority", label: "Senior", prompt: "Has this person worked at a senior level?" }],
+        }),
+      ),
+    ).toEqual({ ok: false });
+    expect(
+      parseDraftCompletion(
+        JSON.stringify({ criteria: [{ kind: "requirement", label: "Go", prompt: "Five years of Go?" }] }),
+      ),
+    ).toEqual({ ok: false });
+    expect(
+      parseDraftCompletion(
+        JSON.stringify({
+          criteria: [{ kind: "preference", label: "Scope", prompt: "How closely does demonstrated seniority match senior?" }],
+        }),
+      ),
+    ).toEqual({ ok: false });
+    expect(
+      parseDraftCompletion(
+        JSON.stringify({
+          criteria: [{ kind: "preference", label: "Stack", prompt: "What technologies has this person used?" }],
+        }),
+      ),
+    ).toEqual({ ok: false });
   });
 
   it("rejects text that is not a criteria object", () => {

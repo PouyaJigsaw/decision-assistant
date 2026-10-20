@@ -24,7 +24,6 @@ const DRAFT_COMPLETION_TEXT = JSON.stringify({
       label: "No ownership",
       prompt: "Has the candidate never owned production systems?",
     },
-    { kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
   ],
 });
 
@@ -611,7 +610,6 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
           label: "No ownership",
           prompt: "Has the candidate never owned production systems?",
         },
-        { id: "c3", kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
       ],
       omitted: ["cultural fit"],
       usage: { inputTokens: 1842, outputTokens: 610 },
@@ -759,6 +757,26 @@ describe("POST /v1/evaluations", () => {
     expect(jev.calls).toBe(1);
     expect(llm.calls).toBe(0);
     expect(db.select().from(evaluations).get()?.approvedText).toBe(APPROVED_TEXT);
+  });
+
+  it("does not attach a comparison prompt when comparisonEnabled is omitted", async () => {
+    const { jev, llm } = contactProviders();
+    const { app } = createTestApp({ jev, llm });
+    const { headers } = await signIn(app);
+    const { role, rubric } = await approveRubric(app, headers);
+    const evaluated = await app.request("/v1/evaluations", {
+      method: "POST",
+      headers: { ...headers, "Idempotency-Key": "12121212-1212-4121-8121-121212121212" },
+      body: JSON.stringify({
+        roleId: role.id,
+        rubricVersionId: rubric.id,
+        approvedText: APPROVED_TEXT,
+        keepExtracts: true,
+      }),
+    });
+    expect(evaluated.status).toBe(200);
+    const body = await evaluated.json();
+    expect(body.comparison).toBeUndefined();
   });
 
   it("stores a client comparison, grounds excerpts, and leaves LLM dollars null", async () => {

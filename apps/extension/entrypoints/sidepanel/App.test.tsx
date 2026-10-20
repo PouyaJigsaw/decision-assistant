@@ -60,13 +60,22 @@ const chromeState = vi.hoisted(() => {
 vi.stubGlobal("chrome", {
   runtime: {
     sendMessage: async () => ({ ok: true }),
+    getURL: (path: string) => `chrome-extension://ext/${path}`,
   },
   tabs: {
     create: async () => ({ id: 1 }),
+    update: async () => ({ id: 1 }),
+    remove: async () => undefined,
+    onUpdated: { addListener() {}, removeListener() {} },
   },
   webNavigation: {
+    onBeforeNavigate: { addListener() {}, removeListener() {} },
     onErrorOccurred: { addListener() {}, removeListener() {} },
     onCommitted: { addListener() {}, removeListener() {} },
+    onCompleted: { addListener() {}, removeListener() {} },
+  },
+  declarativeNetRequest: {
+    updateSessionRules: async () => undefined,
   },
   storage: chromeState.storage,
 });
@@ -88,6 +97,8 @@ function json(data: unknown, status = 200) {
 }
 
 describe("App sitting flow", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     chromeState.reset();
     chromeState.local.sessionToken = "tok-1";
@@ -96,31 +107,29 @@ describe("App sitting flow", () => {
     chromeState.session.panelRubricId = "rubric-1";
     chromeState.session.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
     chromeState.session.extract = extract;
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = String(input);
-        if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
-        if (url.endsWith("/v1/roles")) return json({ roles: [] });
-        if (url.endsWith("/v1/evaluations") && init?.method !== "POST") {
-          return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
-        }
-        if (url.endsWith("/v1/evaluations")) {
-          return json({
-            id: "e1",
-            status: "success",
-            action: "investigate",
-            score: 62,
-            reasonCode: "missing_evidence",
-            answers: [],
-            jev: { usage: { inputTokens: 2180, outputTokens: 36 }, cost: { totalUsd: 0.00009 } },
-            llm: { usage: { inputTokens: 412, outputTokens: 88 }, cost: { totalUsd: 0.014 } },
-            usesRemaining: 2,
-          });
-        }
-        throw new Error(url);
-      }),
-    );
+    fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
+      if (url.endsWith("/v1/roles")) return json({ roles: [] });
+      if (url.endsWith("/v1/evaluations") && init?.method !== "POST") {
+        return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
+      }
+      if (url.endsWith("/v1/evaluations")) {
+        return json({
+          id: "e1",
+          status: "success",
+          action: "investigate",
+          score: 62,
+          reasonCode: "missing_evidence",
+          answers: [],
+          jev: { usage: { inputTokens: 2180, outputTokens: 36 }, cost: { totalUsd: 0.00009 } },
+          llm: { usage: { inputTokens: 412, outputTokens: 88 }, cost: { totalUsd: 0.014 } },
+          usesRemaining: 2,
+        });
+      }
+      throw new Error(url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
   });
 
   afterEach(() => {
@@ -128,27 +137,41 @@ describe("App sitting flow", () => {
     vi.restoreAllMocks();
   });
 
-  it("opens preview for a stored rubric and extract, then a later extract returns to preview", async () => {
+  it("evaluates a stored extract from Continue, Retry re-runs it, and a later extract does not navigate", async () => {
     const user = userEvent.setup();
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    expect(await screen.findByText("Nothing is uploaded until you confirm.")).toBeTruthy();
-
-    await user.click(screen.getByRole("button", { name: "Evaluate" }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
+    expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Preview the extract" })).toBeNull();
+
+    const posted = fetchMock.mock.calls
+      .filter(([url, init]) => String(url).endsWith("/v1/evaluations") && (init as RequestInit | undefined)?.method === "POST")
+      .map(([, init]) => JSON.parse(String((init as RequestInit).body)) as Record<string, unknown>);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.comparisonEnabled).toBe(false);
+    expect(posted[0]?.keepExtracts).toBe(false);
+    expect(posted[0]?.approvedText).toContain("Staff engineer");
+    expect(posted[0]?.approvedText).toContain("Builds Go services");
+    expect(posted[0]?.approvedText).toContain("four years");
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByText("Nothing is uploaded until you confirm.")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Investigate" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Contact" })).toBeNull();
+    expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
+    expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([url, init]) => String(url).endsWith("/v1/evaluations") && (init as RequestInit | undefined)?.method === "POST",
+      ),
+    ).toHaveLength(2);
 
     await chrome.storage.session.set({
       extract: { ...extract, url: "https://www.linkedin.com/in/two", capturedAt: 2 },
     });
 
-    expect(await screen.findByText("https://www.linkedin.com/in/two")).toBeTruthy();
-    expect(screen.getByText("Nothing is uploaded until you confirm.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Investigate" })).toBeTruthy();
+    expect(screen.queryByText("https://www.linkedin.com/in/two")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Preview the extract" })).toBeNull();
   });
 
   it("returns to the result from history", async () => {
@@ -192,7 +215,6 @@ describe("App sitting flow", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    await user.click(await screen.findByRole("button", { name: "Evaluate" }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "History" }));
     expect(await screen.findByRole("heading", { name: "Running total" })).toBeTruthy();
@@ -256,7 +278,6 @@ describe("App sitting flow", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    await user.click(await screen.findByRole("button", { name: "Evaluate" }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "History" }));
     expect(await screen.findByRole("heading", { name: "Running total" })).toBeTruthy();
@@ -270,7 +291,6 @@ describe("App sitting flow", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    await user.click(await screen.findByRole("button", { name: "Evaluate" }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Change job description" }));
     expect(await screen.findByRole("heading", { name: "Saved roles" })).toBeTruthy();
@@ -289,9 +309,8 @@ describe("App sitting flow", () => {
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    expect(await screen.findByText("Nothing is uploaded until you confirm.")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Evaluate" }));
     expect(await screen.findByText("Evaluation failed")).toBeTruthy();
+    expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
   });
 });
 
@@ -470,7 +489,7 @@ describe("App dashboard", () => {
     expect(screen.queryByRole("heading", { name: "Create a role" })).toBeNull();
   });
 
-  it("opens preview copy from Continue when a rubric is stored", async () => {
+  it("evaluates from Continue when a rubric and extract are stored", async () => {
     chromeState.reset();
     chromeState.local.sessionToken = "tok-1";
     chromeState.session.openaiApiKey = "sk-test";
@@ -483,7 +502,8 @@ describe("App dashboard", () => {
     render(<App />);
 
     await user.click(await screen.findByRole("button", { name: /Continue/ }));
-    expect(await screen.findByText("Nothing is uploaded until you confirm.")).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
+    expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
   });
 
   it("opens a saved role with the job description and rubric", async () => {
@@ -520,6 +540,11 @@ describe("App dashboard", () => {
     const user = userEvent.setup();
     render(<App />);
 
+    await user.click(await screen.findByRole("button", { name: /Evaluated for Senior backend/ }));
+    expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Home" }));
+    expect(await screen.findByRole("heading", { name: "Saved roles" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New job description" })).toBeTruthy();
     await user.click(await screen.findByRole("button", { name: /Evaluated for Senior backend/ }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Back" }));

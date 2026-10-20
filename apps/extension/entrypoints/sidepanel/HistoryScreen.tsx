@@ -1,6 +1,6 @@
 import { formatUsd, type Action } from "@decision-assistant/domain";
 import { useEffect, useState } from "react";
-import { PRODUCT_NAME } from "../../src/copy";
+import { evaluatedForCopy, PRODUCT_NAME, usesRemainingCopy } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 const ACTION_LABEL: Record<Action, string> = {
@@ -12,8 +12,11 @@ const ACTION_LABEL: Record<Action, string> = {
 
 export type HistoryRow = {
   id: string;
+  status?: string;
   action: Action | string;
+  roleId?: string;
   roleTitle: string;
+  candidateName?: string;
   jevTotalUsd: number;
   llmTotalUsd: number;
   comparisonEnabled: boolean;
@@ -21,13 +24,19 @@ export type HistoryRow = {
 
 export function HistoryScreen({
   usesRemaining,
+  cap = 3,
   api,
+  onBack,
+  onOpen,
 }: {
-  usesRemaining: number;
+  usesRemaining: number | null;
+  cap?: number | null;
   api: {
     list: () => Promise<{ evaluations: HistoryRow[]; totals: { jevUsd: number; llmUsd: number } }>;
     deleteAll: () => Promise<unknown>;
   };
+  onBack?: () => void;
+  onOpen?: (id: string) => void;
 }) {
   const [data, setData] = useState<{ evaluations: HistoryRow[]; totals: { jevUsd: number; llmUsd: number } } | null>(
     null,
@@ -45,33 +54,46 @@ export function HistoryScreen({
   if (!data) {
     return (
       <section className="panel">
-        <PanelHeader title={PRODUCT_NAME} subtitle="History" />
+        <PanelHeader title={PRODUCT_NAME} subtitle="History" onBack={onBack} />
       </section>
     );
   }
 
   return (
     <section className="panel">
-      <PanelHeader title={PRODUCT_NAME} subtitle="History" />
+      <PanelHeader title={PRODUCT_NAME} subtitle="History" onBack={onBack} />
       <div>
         <h2>Running total</h2>
         <p>Jev {formatUsd(data.totals.jevUsd)}</p>
-        <p>LLM {formatUsd(data.totals.llmUsd)}</p>
         <p className="lede">Totals use the price stored with each run.</p>
-        <p className="meter">Uses remaining: {usesRemaining} of 3</p>
+        <p className="meter">
+          {usesRemainingCopy(usesRemaining, cap)}
+        </p>
       </div>
       <div className="stack">
-        {data.evaluations.map((row) => (
-          <article className="card" key={row.id}>
-            <h3>{ACTION_LABEL[row.action as Action] ?? row.action}</h3>
-            <p>{row.roleTitle}</p>
-            <p>
-              {row.comparisonEnabled
-                ? `Jev ${formatUsd(row.jevTotalUsd)} · LLM ${formatUsd(row.llmTotalUsd)}`
-                : `Jev ${formatUsd(row.jevTotalUsd)} · LLM off`}
-            </p>
-          </article>
-        ))}
+        {data.evaluations.map((row) => {
+          const body = (
+            <>
+              <h3>{evaluatedForCopy(row.roleTitle, row.candidateName)}</h3>
+              <p>{ACTION_LABEL[row.action as Action] ?? row.action}</p>
+              <p>
+                {`Jev ${formatUsd(row.jevTotalUsd)}`}
+              </p>
+            </>
+          );
+          if (row.status === "success") {
+            return (
+              <button className="card" type="button" key={row.id} onClick={() => onOpen?.(row.id)}>
+                {body}
+              </button>
+            );
+          }
+          return (
+            <article className="card" key={row.id}>
+              {body}
+            </article>
+          );
+        })}
       </div>
       <button className="primary" type="button" onClick={() => void handleDelete()}>
         Delete all history

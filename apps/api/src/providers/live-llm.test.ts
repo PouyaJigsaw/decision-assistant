@@ -7,7 +7,8 @@ const MODEL_OPTION = "anthropic/claude-opus-5";
 const NOTES = "Need five years of Go.";
 const PROFILE = "Staff engineer. Led the payments API in Go for four years.";
 
-const DRAFT_TEXT = '{"criteria":[{"kind":"requirement","label":"Go","prompt":"Five years of Go?"}]}';
+const DRAFT_TEXT =
+  '{"criteria":[{"kind":"requirement","label":"Go","prompt":"Does this person have at least five years of Go?"}]}';
 const COMPARE_TEXT =
   '{"answers":[{"criterionId":"go","result":"match","confidence":0.91,"excerpt":"Led the payments API in Go for four years."}]}';
 
@@ -55,7 +56,7 @@ describe("createLiveLlm", () => {
     expect(llm.calls).toBe(1);
     expect(result).toEqual({
       model: "claude-response-model",
-      criteria: [{ kind: "requirement", label: "Go", prompt: "Five years of Go?" }],
+      criteria: [{ kind: "requirement", label: "Go", prompt: "Does this person have at least five years of Go?" }],
       usage: { inputTokens: 10, outputTokens: 20 },
     });
   });

@@ -54,7 +54,6 @@ export function DashboardScreen({
       <article className="card">
         <h2>Running total</h2>
         <p>Jev {formatUsd(totals.jevUsd)}</p>
-        <p>LLM {formatUsd(totals.llmUsd)}</p>
         <p className="lede">Totals use the price stored with each run.</p>
       </article>
       {sitting ? (
@@ -94,9 +93,7 @@ export function DashboardScreen({
               <p>
                 {ACTION_LABEL[row.action as Action] ?? row.action}
                 {" · "}
-                {row.comparisonEnabled
-                  ? `Jev ${formatUsd(row.jevTotalUsd)} · LLM ${formatUsd(row.llmTotalUsd)}`
-                  : `Jev ${formatUsd(row.jevTotalUsd)} · LLM off`}
+                {`Jev ${formatUsd(row.jevTotalUsd)}`}
               </p>
             </>
           );

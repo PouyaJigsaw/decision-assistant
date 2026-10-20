@@ -60,7 +60,7 @@ export function ConnectionScreen({
       {showWelcome ? (
         <article className="card">
           <h2>You’re using your ChatGPT plan</h2>
-          <p className="lede">Eligible draft and comparison requests use your ChatGPT plan. Manage usage in ChatGPT settings.</p>
+          <p className="lede">Eligible draft requests use your ChatGPT plan. Manage usage in ChatGPT settings.</p>
           <button className="primary" type="button" onClick={onDismissWelcome}>
             Got it
           </button>

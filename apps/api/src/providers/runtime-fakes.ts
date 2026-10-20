@@ -63,7 +63,11 @@ export function createRuntimeProviders() {
               label: "No ownership",
               prompt: "Has the candidate never owned production systems?",
             },
-            { kind: "seniority", label: "Senior", prompt: "How closely does seniority match senior?" },
+            {
+              kind: "requirement",
+              label: "Senior",
+              prompt: "Has this person worked at a senior level?",
+            },
           ],
           usage: { inputTokens: 1842, outputTokens: 610 },
         };
@@ -71,8 +75,10 @@ export function createRuntimeProviders() {
       compare(input) {
         return {
           model: "fake-llm",
-          excerpts: input.criteria.map((criterion, index) => ({
+          answers: input.criteria.map((criterion, index) => ({
             criterionId: criterion.id,
+            result: criterion.kind === "seniority" ? "aligned" : index === 2 ? "mismatch" : "match",
+            confidence: 0.9,
             excerpt: index === 0 ? "Led the payments API in Go for four years." : "not in the profile",
           })),
           usage: { inputTokens: 412, outputTokens: 88 },
