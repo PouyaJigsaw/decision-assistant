@@ -6,8 +6,9 @@
   "scripts": {
     "test": "vitest run",
     "dev": "wxt",
-    "build": "wxt build",
-    "zip": "wxt zip"
+    "build": "VITE_API_ORIGIN=https://decision-assistant.fly.dev wxt build",
+    "build:local": "VITE_API_ORIGIN=http://127.0.0.1:8787 wxt build",
+    "zip": "VITE_API_ORIGIN=https://decision-assistant.fly.dev wxt zip"
   },
   "dependencies": {
     "@decision-assistant/domain": "workspace:*",

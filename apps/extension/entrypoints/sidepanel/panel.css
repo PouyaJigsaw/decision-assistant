@@ -224,10 +224,13 @@ textarea {
 }
 
 .chip {
-  align-self: flex-start;
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
   margin: 0;
   border-radius: 999px;
   background: var(--pill-preferred);
-  padding: 3px 8px;
+  padding: 3px 10px;
   font-size: 12px;
+  text-align: center;
 }

@@ -1,0 +1,18 @@
+---
+description: Rebuild the Chrome extension after every commit and push
+alwaysApply: true
+---
+
+# Rebuild after commit and push
+
+After you finish a `git commit` **and** `git push` in this repo, immediately rebuild the unpacked Chrome extension. Do not wait to be asked. Do not treat the push as the last step.
+
+```bash
+pnpm --filter @decision-assistant/extension build
+```
+
+That script sets `VITE_API_ORIGIN=https://decision-assistant.fly.dev`. Do not prefix the command with a different `VITE_API_ORIGIN`. The package script assigns the hosted origin for that process, so a shell value cannot replace it. Use `pnpm --filter @decision-assistant/extension build:local` only when the user asked for the local API.
+
+That writes `apps/extension/unpacked/chrome-mv3` (gitignored). Skip the rebuild only if the push failed.
+
+If the user is loading an unpacked extension in Chrome, tell them to reload it from `chrome://extensions` so the new build is what they click.
