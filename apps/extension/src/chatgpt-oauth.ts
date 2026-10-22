@@ -6,6 +6,8 @@ export const PLAN_SCOPE = "chatgpt.tokens.use.direct";
 export const SCOPES = `openid profile email offline_access resource.invoke ${PLAN_SCOPE}`;
 export const AGENT_NAME = "Who Fits?";
 export const CALLBACK_URI = "http://127.0.0.1:1455/auth/callback";
+export const CALLBACK_PAGE = "oauth-callback.html";
+export const LOOPBACK_REDIRECT_RULE_ID = 1455;
 export const DYNAMIC_CLIENT_ID = "dynamic_agent_client";
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/#settings";
 
@@ -78,6 +80,68 @@ function decodeJson(value: string): Record<string, unknown> {
 
 export function planUsageEnabled(auth: ChatGptAuth): boolean {
   return auth.scopes.includes(PLAN_SCOPE) && Boolean(auth.access_token);
+}
+
+export function chatgptSignInErrorCopy(error: string): string {
+  if (error === "access_denied") return "ChatGPT plan usage was not enabled.";
+  if (error === "oauth_timeout") return "ChatGPT sign-in timed out. Complete it in the opened tab.";
+  if (error === "oauth_client") return "ChatGPT did not issue a client for this app.";
+  if (error === "oauth_state") return "ChatGPT sign-in could not be verified. Try again.";
+  if (error === "oauth_redirect") return "Who Fits? could not intercept the ChatGPT return URL.";
+  return `ChatGPT sign-in failed (${error}).`;
+}
+
+export function isOAuthCallbackUrl(url: string | undefined, extensionUrl?: string): boolean {
+  if (!url) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const hasResult =
+    parsed.searchParams.has("code") || parsed.searchParams.has("error") || parsed.searchParams.has("client_id");
+  if (!hasResult) return false;
+  if (parsed.hostname === "127.0.0.1" && parsed.pathname === "/auth/callback") return true;
+  if (extensionUrl) {
+    try {
+      const ext = new URL(extensionUrl);
+      return parsed.protocol === "chrome-extension:" && parsed.pathname === ext.pathname;
+    } catch {
+      return false;
+    }
+  }
+  return parsed.protocol === "chrome-extension:" && parsed.pathname.endsWith(`/${CALLBACK_PAGE}`);
+}
+
+export function loopbackRedirectRule(extensionUrl: string, tabId: number): chrome.declarativeNetRequest.Rule {
+  return {
+    id: LOOPBACK_REDIRECT_RULE_ID,
+    priority: 1,
+    action: {
+      type: "redirect",
+      redirect: { regexSubstitution: `${extensionUrl}\\1` },
+    },
+    condition: {
+      regexFilter: "^http://127\\.0\\.0\\.1:1455/auth/callback(\\?.*)?$",
+      resourceTypes: ["main_frame"],
+      tabIds: [tabId],
+    },
+  };
+}
+
+export async function installLoopbackRedirect(tabId: number): Promise<void> {
+  const extensionUrl = chrome.runtime.getURL(CALLBACK_PAGE);
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [LOOPBACK_REDIRECT_RULE_ID],
+    addRules: [loopbackRedirectRule(extensionUrl, tabId)],
+  });
+}
+
+export async function removeLoopbackRedirect(): Promise<void> {
+  await chrome.declarativeNetRequest.updateSessionRules({
+    removeRuleIds: [LOOPBACK_REDIRECT_RULE_ID],
+  }).catch(() => undefined);
 }
 
 function parseScopes(raw: unknown): string[] {
@@ -350,16 +414,25 @@ export function createChromeOAuthHost(): OAuthHost {
   return {
     crypto,
     now: () => Date.now(),
-    fetch,
+    fetch: globalThis.fetch.bind(globalThis),
     randomBytes(size) {
       return crypto.getRandomValues(new Uint8Array(size));
     },
     async openTab(url) {
-      const tab = await chrome.tabs.create({ url, active: true });
+      const tab = await chrome.tabs.create({ url: "about:blank", active: true });
       if (tab.id == null) throw new Error("oauth_tab");
+      try {
+        await installLoopbackRedirect(tab.id);
+        await chrome.tabs.update(tab.id, { url });
+      } catch (error) {
+        await removeLoopbackRedirect();
+        await chrome.tabs.remove(tab.id).catch(() => undefined);
+        throw error instanceof Error && error.message === "oauth_tab" ? error : new Error("oauth_redirect");
+      }
       return tab.id;
     },
     async closeTab(id) {
+      await removeLoopbackRedirect();
       await chrome.tabs.remove(id).catch(() => undefined);
     },
     async waitForCallback(tabId) {
@@ -369,33 +442,36 @@ export function createChromeOAuthHost(): OAuthHost {
 }
 
 export function waitForLoopbackCallback(tabId: number, timeoutMs = 300_000): Promise<string> {
+  const extensionUrl = chrome.runtime.getURL(CALLBACK_PAGE);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       stop();
       reject(new Error("oauth_timeout"));
     }, timeoutMs);
-    function isCallback(url: string | undefined) {
-      return Boolean(url && url.startsWith("http://127.0.0.1:") && url.includes("/auth/callback"));
-    }
-    function onNav(details: { tabId: number; url?: string }) {
-      if (details.tabId !== tabId || !isCallback(details.url)) return;
-      stop();
-      resolve(details.url!);
-    }
-    function onUpdated(_id: number, change: { url?: string }, tab: { id?: number; url?: string }) {
-      const url = change.url ?? tab.url;
-      if (tab.id !== tabId || !isCallback(url)) return;
+    function consider(url: string | undefined, eventTabId?: number) {
+      if (!isOAuthCallbackUrl(url, extensionUrl)) return;
+      if (eventTabId != null && eventTabId !== tabId && !url?.startsWith("chrome-extension:")) return;
       stop();
       resolve(url!);
     }
+    function onNav(details: { tabId: number; url?: string }) {
+      consider(details.url, details.tabId);
+    }
+    function onUpdated(_id: number, change: { url?: string }, tab: { id?: number; url?: string }) {
+      consider(change.url ?? tab.url, tab.id ?? _id);
+    }
     function stop() {
       clearTimeout(timer);
+      chrome.webNavigation.onBeforeNavigate.removeListener(onNav);
       chrome.webNavigation.onErrorOccurred.removeListener(onNav);
       chrome.webNavigation.onCommitted.removeListener(onNav);
+      chrome.webNavigation.onCompleted.removeListener(onNav);
       chrome.tabs.onUpdated.removeListener(onUpdated);
     }
+    chrome.webNavigation.onBeforeNavigate.addListener(onNav);
     chrome.webNavigation.onErrorOccurred.addListener(onNav);
     chrome.webNavigation.onCommitted.addListener(onNav);
+    chrome.webNavigation.onCompleted.addListener(onNav);
     chrome.tabs.onUpdated.addListener(onUpdated);
   });
 }

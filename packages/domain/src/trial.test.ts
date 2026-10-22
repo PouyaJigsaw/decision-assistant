@@ -23,6 +23,11 @@ describe("preflight", () => {
   it("proceeds when a use remains", () => {
     expect(preflight({ evaluationsEnabled: true, successCount: 2 })).toEqual({ proceed: true });
   });
+
+  it("skips the trial cap when successCap is unlimited", () => {
+    expect(preflight({ evaluationsEnabled: true, successCount: 3, successCap: null })).toEqual({ proceed: true });
+    expect(preflight({ evaluationsEnabled: true, successCount: 99, successCap: null })).toEqual({ proceed: true });
+  });
 });
 
 describe("countsAsUse", () => {
@@ -39,6 +44,11 @@ describe("usesRemaining", () => {
     expect(usesRemaining(0)).toBe(3);
     expect(usesRemaining(3)).toBe(0);
     expect(usesRemaining(4)).toBe(0);
+  });
+
+  it("does not clamp remaining uses when the cap is unlimited", () => {
+    expect(usesRemaining(0, null)).toBe(null);
+    expect(usesRemaining(12, null)).toBe(null);
   });
 });
 

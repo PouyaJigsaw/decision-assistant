@@ -4,6 +4,7 @@ export const users = sqliteTable("users", {
   id: text("id").primaryKey(),
   email: text("email").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  trialSuccessCap: integer("trial_success_cap"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -18,6 +19,9 @@ export const roles = sqliteTable("roles", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   title: text("title").notNull(),
+  company: text("company"),
+  summary: text("summary"),
+  notes: text("notes"),
   createdAt: integer("created_at").notNull(),
 });
 
@@ -64,6 +68,8 @@ export const evaluations = sqliteTable(
     keepExtracts: integer("keep_extracts").notNull(),
     comparisonEnabled: integer("comparison_enabled").notNull(),
     notes: text("notes"),
+    candidateName: text("candidate_name"),
+    roleTitle: text("role_title"),
     createdAt: integer("created_at").notNull(),
     updatedAt: integer("updated_at").notNull(),
   },
@@ -81,6 +87,13 @@ export const trialUses = sqliteTable("trial_uses", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull(),
   evaluationId: text("evaluation_id").notNull().unique(),
+  createdAt: integer("created_at").notNull(),
+});
+
+export const hostedRoleUses = sqliteTable("hosted_role_uses", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  roleId: text("role_id").notNull().unique(),
   createdAt: integer("created_at").notNull(),
 });
 

@@ -1,9 +1,3 @@
-import {
-  chromeLocalKv,
-  createChromeOAuthHost,
-  disconnectChatGpt,
-  signInWithChatGpt,
-} from "../src/chatgpt-oauth";
 import { extractSections } from "../src/extract";
 import { readDocument } from "../src/read-document";
 
@@ -24,22 +18,6 @@ export default defineBackground(() => {
       void captureAndOpen(typeof message.tabId === "number" ? message.tabId : undefined).then(() => {
         sendResponse({ ok: true });
       });
-      return true;
-    }
-    if (message.type === "chatgpt-signin") {
-      void signInWithChatGpt(createChromeOAuthHost(), chromeLocalKv())
-        .then((session) => sendResponse({ ok: true, session }))
-        .catch((error: unknown) =>
-          sendResponse({ ok: false, error: error instanceof Error ? error.message : "oauth_failed" }),
-        );
-      return true;
-    }
-    if (message.type === "chatgpt-disconnect") {
-      void disconnectChatGpt(createChromeOAuthHost(), chromeLocalKv())
-        .then(() => sendResponse({ ok: true }))
-        .catch((error: unknown) =>
-          sendResponse({ ok: false, error: error instanceof Error ? error.message : "oauth_failed" }),
-        );
       return true;
     }
   });

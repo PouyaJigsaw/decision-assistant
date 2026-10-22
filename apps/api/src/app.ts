@@ -7,7 +7,6 @@ import {
   parseCompareCompletion,
   parseDraftCompletion,
   parseJevResponse,
-  preflight,
   recommend,
   scanSafety,
   toJevRequest,
@@ -33,9 +32,10 @@ import {
   verifyPassword,
 } from "./auth";
 import type { AppDatabase } from "./db/client";
-import { corrections, evaluations, roles, rubricVersions, spendEvents, trialUses, users } from "./db/schema";
+import { corrections, evaluations, hostedRoleUses, roles, rubricVersions, spendEvents, trialUses, users } from "./db/schema";
 import type { Env } from "./env";
 import type { JevClient, LlmClient } from "./providers/types";
+import { privacyPage, productPage } from "./public-pages";
 
 type AppVariables = { user: { id: string; email: string; trialSuccessCap: number | null } };
 
@@ -71,6 +71,8 @@ export function createApp(deps: {
   }
 
   app.get("/v1/health", (c) => c.json({ ok: true }));
+  app.get("/", (c) => c.html(productPage()));
+  app.get("/privacy", (c) => c.html(privacyPage()));
 
   app.post("/v1/users", async (c) => {
     const body = await c.req.json().catch(() => null);
@@ -112,11 +114,15 @@ export function createApp(deps: {
   app.get("/v1/me", requireUser, (c) => {
     const user = c.get("user");
     const successCount = db.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
+    const roleCap = successCapFor(user, deps.env.trialSuccessCap);
+    const hostedCount = db.select().from(hostedRoleUses).where(eq(hostedRoleUses.userId, user.id)).all().length;
     return c.json({
       email: user.email,
       successCount,
-      usesRemaining: usesRemaining(successCount, successCapFor(user, deps.env.trialSuccessCap)),
-      cap: successCapFor(user, deps.env.trialSuccessCap),
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: usesRemaining(hostedCount, roleCap),
+      roleCap,
     });
   });
 
@@ -204,19 +210,48 @@ export function createApp(deps: {
   });
 
   app.post("/v1/roles/:roleId/rubric-drafts", requireUser, async (c) => {
-    const role = ownedRole(db, routeParam(c, "roleId"), c.get("user").id);
+    const user = c.get("user");
+    const role = ownedRole(db, routeParam(c, "roleId"), user.id);
     if (!role) return c.json({ error: "role_not_found" }, 404);
     const body = await c.req.json().catch(() => null);
     const notes = body && typeof body.notes === "string" ? body.notes : "";
     const words = notes.trim().split(/\s+/).filter(Boolean).length;
     if (words < 150) return c.json({ error: "insufficient_notes" }, 422);
+    const hasClientCompletion = body != null && typeof body === "object" && "completion" in body && body.completion != null;
     const completion = completionSchema.safeParse(body?.completion);
-    if (!completion.success) return c.json({ error: "llm_completion_required" }, 400);
-    const drafted = parseDraftCompletion(completion.data.text);
-    if (!drafted.ok) return c.json({ error: "llm_failed" }, 502);
+    let draftedCriteria: { kind: Criterion["kind"]; label: string; prompt: string }[];
+    let usage: { inputTokens: number; outputTokens: number };
+    let countHostedRole = false;
+    if (hasClientCompletion) {
+      if (!completion.success) return c.json({ error: "llm_completion_required" }, 400);
+      const drafted = parseDraftCompletion(completion.data.text);
+      if (!drafted.ok) return c.json({ error: "llm_failed" }, 502);
+      draftedCriteria = drafted.criteria;
+      usage = { inputTokens: completion.data.inputTokens, outputTokens: completion.data.outputTokens };
+    } else {
+      const cap = successCapFor(user, deps.env.trialSuccessCap);
+      const alreadyCounted = db
+        .select()
+        .from(hostedRoleUses)
+        .where(and(eq(hostedRoleUses.userId, user.id), eq(hostedRoleUses.roleId, role.id)))
+        .get();
+      const hostedCount = db.select().from(hostedRoleUses).where(eq(hostedRoleUses.userId, user.id)).all().length;
+      if (!alreadyCounted && cap != null && hostedCount >= cap) {
+        return c.json({ error: "trial_cap", message: trialClosedMessage(cap) }, 409);
+      }
+      let hosted;
+      try {
+        hosted = await deps.llm.draftRubric(notes);
+      } catch {
+        return c.json({ error: "llm_failed" }, 502);
+      }
+      draftedCriteria = hosted.criteria;
+      usage = hosted.usage;
+      countHostedRole = !alreadyCounted;
+    }
     const omitted: string[] = [];
     const criteria: Criterion[] = [];
-    for (const item of drafted.criteria) {
+    for (const item of draftedCriteria) {
       const scan = scanSafety(`${item.label}\n${item.prompt}`);
       if (!scan.ok) {
         omitted.push(scan.term);
@@ -231,6 +266,11 @@ export function createApp(deps: {
     }
     if (criteria.length === 0) {
       return c.json({ error: "invalid_rubric", reason: "empty_requirement" }, 422);
+    }
+    if (countHostedRole) {
+      db.insert(hostedRoleUses)
+        .values({ id: crypto.randomUUID(), userId: user.id, roleId: role.id, createdAt: Date.now() })
+        .run();
     }
     const parsed = parseJobPosting(notes);
     const title =
@@ -248,7 +288,7 @@ export function createApp(deps: {
       {
         criteria,
         omitted,
-        usage: { inputTokens: completion.data.inputTokens, outputTokens: completion.data.outputTokens },
+        usage,
         cost: { inputUsd: 0, outputUsd: 0, totalUsd: 0 },
       },
       201,
@@ -280,12 +320,10 @@ export function createApp(deps: {
       .from(evaluations)
       .where(and(eq(evaluations.userId, user.id), eq(evaluations.idempotencyKey, idempotencyKey)))
       .get();
-    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
-    const cap = successCapFor(user, deps.env.trialSuccessCap);
     if (existing) {
       if (existing.bodyHash !== hash) return c.json({ error: "idempotency_conflict" }, 409);
       if (existing.status === "success" || existing.status === "refused_cap") {
-        const replayed = toEvaluationResponse(db, existing, usesRemaining(successCount, cap), true);
+        const replayed = toEvaluationResponse(db, existing, null, true);
         if (existing.status === "success" && existing.comparisonEnabled && !existing.llmModel && existing.approvedText) {
           return c.json(withComparisonPrompt(replayed, criteria, existing.approvedText, true));
         }
@@ -298,37 +336,6 @@ export function createApp(deps: {
     if (!deps.env.evaluationsEnabled) return c.json({ error: "evaluations_disabled" }, 503);
     if (spendToday(db, user.id) >= deps.env.dailySpendCapUsd) {
       return c.json({ error: "daily_spend_cap" }, 503);
-    }
-    const gate = preflight({
-      evaluationsEnabled: true,
-      successCount,
-      successCap: cap,
-    });
-    if (!gate.proceed) {
-      if (gate.reason === "kill_switch") return c.json({ error: "evaluations_disabled" }, 503);
-      const refusedAt = Date.now();
-      if (!existing) {
-        db.insert(evaluations)
-          .values({
-            id: crypto.randomUUID(),
-            userId: user.id,
-            roleId,
-            rubricVersionId,
-            idempotencyKey,
-            bodyHash: hash,
-            status: "refused_cap",
-            countsAsUse: 0,
-            keepExtracts: keepExtracts ? 1 : 0,
-            comparisonEnabled: comparisonEnabled ? 1 : 0,
-            createdAt: refusedAt,
-            updatedAt: refusedAt,
-          })
-          .run();
-      }
-      return c.json(
-        { error: "trial_cap", message: trialClosedMessage(cap) },
-        409,
-      );
     }
     const now = Date.now();
     const id = existing?.id ?? crypto.randomUUID();
@@ -362,7 +369,7 @@ export function createApp(deps: {
         .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
         .where(eq(evaluations.id, id))
         .run();
-      return c.json({ error: "jev_failed", reason: jevResult.reason, id, usesRemaining: usesRemaining(successCount, cap) }, 502);
+      return c.json({ error: "jev_failed", reason: jevResult.reason, id, usesRemaining: null }, 502);
     }
     const parsed = parseJevResponse(criteria, jevResult.payload);
     if (!parsed.ok) {
@@ -370,7 +377,7 @@ export function createApp(deps: {
         .set({ status: "jev_failed", countsAsUse: 0, updatedAt: Date.now() })
         .where(eq(evaluations.id, id))
         .run();
-      return c.json({ error: "jev_failed", reason: "invalid_jev", id, usesRemaining: usesRemaining(successCount, cap) }, 502);
+      return c.json({ error: "jev_failed", reason: "invalid_jev", id, usesRemaining: null }, 502);
     }
     const rec = recommend(criteria, parsed.answers);
     const answers = parsed.answers.map((answer) => ({
@@ -383,15 +390,7 @@ export function createApp(deps: {
     const jevCost = costFromUsage(parsed.usage, deps.env.jevPrice);
     const used = countsAsUse({ jevValid: true, idempotencyReplay: false });
     const finishedAt = Date.now();
-    const committed = db.transaction((tx) => {
-      const liveCount = tx.select().from(trialUses).where(eq(trialUses.userId, user.id)).all().length;
-      if (cap != null && liveCount >= cap) {
-        tx.update(evaluations)
-          .set({ status: "refused_cap", countsAsUse: 0, updatedAt: finishedAt })
-          .where(eq(evaluations.id, id))
-          .run();
-        return { kind: "cap" as const };
-      }
+    db.transaction((tx) => {
       tx.update(evaluations)
         .set({
           status: "success",
@@ -425,18 +424,11 @@ export function createApp(deps: {
           .values({ id: crypto.randomUUID(), userId: user.id, evaluationId: id, createdAt: finishedAt })
           .run();
       }
-      return { kind: "ok" as const, remaining: usesRemaining(liveCount + (used ? 1 : 0), cap) };
     });
-    if (committed.kind === "cap") {
-      return c.json(
-        { error: "trial_cap", message: trialClosedMessage(cap) },
-        409,
-      );
-    }
     const stored = getEvaluation(db, id);
     return c.json(
       withComparisonPrompt(
-        toEvaluationResponse(db, stored!, committed.remaining, false),
+        toEvaluationResponse(db, stored!, null, false),
         criteria,
         approvedText,
         comparisonEnabled,
@@ -483,20 +475,14 @@ export function createApp(deps: {
       })
       .where(eq(evaluations.id, row.id))
       .run();
-    const viewer = c.get("user");
-    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, viewer.id)).all().length;
     const stored = getEvaluation(db, row.id);
-    return c.json(
-      toEvaluationResponse(db, stored!, usesRemaining(successCount, successCapFor(viewer, deps.env.trialSuccessCap)), false),
-    );
+    return c.json(toEvaluationResponse(db, stored!, null, false));
   });
 
   app.get("/v1/evaluations/:id", requireUser, (c) => {
     const row = ownedEvaluation(db, routeParam(c, "id"), c.get("user").id);
     if (!row) return c.json({ error: "evaluation_not_found" }, 404);
-    const viewer = c.get("user");
-    const successCount = db.select().from(trialUses).where(eq(trialUses.userId, viewer.id)).all().length;
-    return c.json(toEvaluationResponse(db, row, usesRemaining(successCount, successCapFor(viewer, deps.env.trialSuccessCap)), false));
+    return c.json(toEvaluationResponse(db, row, null, false));
   });
 
   app.get("/v1/evaluations", requireUser, (c) => {
@@ -622,7 +608,7 @@ function successCapFor(user: { trialSuccessCap: number | null }, fallback: numbe
 
 function trialClosedMessage(cap: number | null): string {
   const count = cap === 3 ? "three" : String(cap);
-  return `This trial covered ${count} profiles. Evaluate is closed.`;
+  return `This trial covered ${count} job roles. Creating another is closed.`;
 }
 
 function evaluationRoleTitle(db: AppDatabase, row: { roleId: string; roleTitle: string | null }) {

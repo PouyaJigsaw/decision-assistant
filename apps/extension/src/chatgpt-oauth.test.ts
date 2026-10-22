@@ -3,15 +3,23 @@ import {
   AGENT_NAME,
   AUTH_AUTHORIZE,
   AUTH_TOKEN,
+  CALLBACK_PAGE,
   CALLBACK_URI,
   DYNAMIC_CLIENT_ID,
+  LOOPBACK_REDIRECT_RULE_ID,
   PLAN_SCOPE,
   RESOURCE,
   buildAuthorizeUrl,
+  chatgptSignInErrorCopy,
+  createChromeOAuthHost,
   disconnectChatGpt,
+  installLoopbackRedirect,
+  isOAuthCallbackUrl,
+  loopbackRedirectRule,
   planUsageEnabled,
   refreshChatGpt,
   signInWithChatGpt,
+  waitForLoopbackCallback,
   type ChatGptAuth,
   type Kv,
   type OAuthHost,
@@ -269,6 +277,49 @@ describe("signInWithChatGpt", () => {
     expect(session.planUsage).toBe(false);
     expect(session.email).toBe("user@example.com");
   });
+
+  it("exchanges a code captured on the extension callback page", async () => {
+    const pair = await rsaPair();
+    const jwk = await publicJwk(pair.publicKey);
+    const kv = memoryKv();
+    let host: ReturnType<typeof captureHost>;
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = String(input);
+      if (url.endsWith("/.well-known/openid-configuration")) {
+        return new Response(JSON.stringify(await discoveryAndJwks(jwk)));
+      }
+      if (url.endsWith("/jwks.json")) return new Response(JSON.stringify({ keys: [jwk] }));
+      if (url === AUTH_TOKEN) {
+        const nonce = new URL(host.authorizeUrl).searchParams.get("nonce") ?? "";
+        const idToken = await signJwt(pair.privateKey, {
+          iss: "https://auth.openai.com",
+          aud: "oaiapp_issued",
+          sub: "sub-1",
+          email: "user@example.com",
+          nonce,
+          exp: Math.floor(Date.now() / 1000) + 3600,
+        });
+        return new Response(
+          JSON.stringify({
+            access_token: "access-1",
+            refresh_token: "refresh-1",
+            id_token: idToken,
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: `openid ${PLAN_SCOPE}`,
+          }),
+        );
+      }
+      throw new Error(url);
+    };
+    host = captureHost(fetchImpl, async (authorizeUrl) => {
+      const state = new URL(authorizeUrl).searchParams.get("state");
+      return `chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef/${CALLBACK_PAGE}?code=auth-code&state=${state}&client_id=oaiapp_issued`;
+    });
+    const session = await signInWithChatGpt(host, kv);
+    expect(session.planUsage).toBe(true);
+    expect(session.email).toBe("user@example.com");
+  });
 });
 
 describe("refreshChatGpt", () => {
@@ -397,3 +448,126 @@ describe("disconnectChatGpt", () => {
     });
   });
 });
+
+describe("oauth callback capture", () => {
+  it("recognizes loopback and extension callback URLs that carry a result", () => {
+    const ext = `chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef/${CALLBACK_PAGE}`;
+    expect(isOAuthCallbackUrl(`http://127.0.0.1:1455/auth/callback?code=a&state=s&client_id=oaiapp`, ext)).toBe(true);
+    expect(isOAuthCallbackUrl(`${ext}?code=a&state=s&client_id=oaiapp`, ext)).toBe(true);
+    expect(isOAuthCallbackUrl("https://auth.openai.com/api/accounts/authorize", ext)).toBe(false);
+    expect(isOAuthCallbackUrl(ext, ext)).toBe(false);
+  });
+
+  it("redirects the loopback callback onto the extension page and keeps the query", () => {
+    const ext = `chrome-extension://abcdefghijklmnopqrstuvwxyzabcdef/${CALLBACK_PAGE}`;
+    const rule = loopbackRedirectRule(ext, 9);
+    expect(rule.id).toBe(LOOPBACK_REDIRECT_RULE_ID);
+    expect(rule.action).toEqual({
+      type: "redirect",
+      redirect: { regexSubstitution: `${ext}\\1` },
+    });
+    expect(rule.condition.regexFilter).toBe("^http://127\\.0\\.0\\.1:1455/auth/callback(\\?.*)?$");
+    expect(rule.condition.resourceTypes).toEqual(["main_frame"]);
+    expect(rule.condition.tabIds).toEqual([9]);
+  });
+
+  it("installs the session redirect before waiting and resolves from onBeforeNavigate", async () => {
+    const ext = `chrome-extension://ext/${CALLBACK_PAGE}`;
+    const nav = listen();
+    const dnr = { updateSessionRules: vi.fn(async () => undefined) };
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://ext/${path}` },
+      declarativeNetRequest: dnr,
+      webNavigation: {
+        onBeforeNavigate: nav.onBeforeNavigate,
+        onErrorOccurred: nav.onErrorOccurred,
+        onCommitted: nav.onCommitted,
+        onCompleted: nav.onCompleted,
+      },
+      tabs: { onUpdated: nav.onUpdated },
+    });
+    await installLoopbackRedirect(4);
+    expect(dnr.updateSessionRules).toHaveBeenCalledWith({
+      removeRuleIds: [LOOPBACK_REDIRECT_RULE_ID],
+      addRules: [loopbackRedirectRule(ext, 4)],
+    });
+    const pending = waitForLoopbackCallback(4, 1_000);
+    nav.onBeforeNavigate.emit({
+      tabId: 4,
+      url: "http://127.0.0.1:1455/auth/callback?code=from-nav&state=s&client_id=oaiapp",
+    });
+    await expect(pending).resolves.toContain("code=from-nav");
+  });
+
+  it("resolves after Chrome rewrites the tab to the extension callback page", async () => {
+    const nav = listen();
+    vi.stubGlobal("chrome", {
+      runtime: { getURL: (path: string) => `chrome-extension://ext/${path}` },
+      webNavigation: {
+        onBeforeNavigate: nav.onBeforeNavigate,
+        onErrorOccurred: nav.onErrorOccurred,
+        onCommitted: nav.onCommitted,
+        onCompleted: nav.onCompleted,
+      },
+      tabs: { onUpdated: nav.onUpdated },
+    });
+    const pending = waitForLoopbackCallback(4, 1_000);
+    nav.onUpdated.emit(
+      4,
+      { url: `chrome-extension://ext/${CALLBACK_PAGE}?code=from-dnr&state=s&client_id=oaiapp` },
+      { id: 4, url: `chrome-extension://ext/${CALLBACK_PAGE}?code=from-dnr&state=s&client_id=oaiapp` },
+    );
+    await expect(pending).resolves.toContain("code=from-dnr");
+  });
+});
+
+describe("createChromeOAuthHost", () => {
+  it("calls fetch as a window function so Chrome does not throw Illegal invocation", async () => {
+    vi.stubGlobal("fetch", function fetch(this: unknown) {
+      if (this != null && this !== globalThis) {
+        throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+      }
+      return Promise.resolve(new Response("{}"));
+    });
+    const host = createChromeOAuthHost();
+    await expect(host.fetch("https://auth.openai.com/.well-known/openid-configuration")).resolves.toBeInstanceOf(
+      Response,
+    );
+  });
+});
+
+describe("chatgptSignInErrorCopy", () => {
+  it("keeps access_denied distinct and includes other oauth codes", () => {
+    expect(chatgptSignInErrorCopy("access_denied")).toBe("ChatGPT plan usage was not enabled.");
+    expect(chatgptSignInErrorCopy("oauth_timeout")).toMatch(/timed out/i);
+    expect(chatgptSignInErrorCopy("oauth_client")).toMatch(/client/i);
+    expect(chatgptSignInErrorCopy("invalid_id_token")).toBe("ChatGPT sign-in failed (invalid_id_token).");
+  });
+});
+
+function listen() {
+  function hub<Args extends unknown[]>() {
+    const listeners: Array<(...args: Args) => void> = [];
+    return {
+      addListener(fn: (...args: Args) => void) {
+        listeners.push(fn);
+      },
+      removeListener(fn: (...args: Args) => void) {
+        const index = listeners.indexOf(fn);
+        if (index >= 0) listeners.splice(index, 1);
+      },
+      emit(...args: Args) {
+        for (const listener of [...listeners]) listener(...args);
+      },
+    };
+  }
+  return {
+    onBeforeNavigate: hub<[details: { tabId: number; url?: string }]>(),
+    onErrorOccurred: hub<[details: { tabId: number; url?: string }]>(),
+    onCommitted: hub<[details: { tabId: number; url?: string }]>(),
+    onCompleted: hub<[details: { tabId: number; url?: string }]>(),
+    onUpdated: hub<
+      [id: number, change: { url?: string }, tab: { id?: number; url?: string }]
+    >(),
+  };
+}

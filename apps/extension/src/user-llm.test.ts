@@ -87,6 +87,54 @@ describe("completeDraft", () => {
   it("refuses to complete when no credential is connected", async () => {
     await expect(completeDraft(dual(), host(fetch), "notes")).rejects.toThrow("llm_not_connected");
   });
+
+  it("drafts with a listed ChatGPT model and the documented Responses body", async () => {
+    const auth: ChatGptAuth = {
+      email: "user@example.com",
+      issuer: "https://auth.openai.com",
+      subject: "sub",
+      client_id: "oaiapp",
+      ext_agent_host_id: "urn:uuid:host",
+      id_token: "id",
+      access_token: "chatgpt-access",
+      refresh_token: "refresh",
+      token_type: "Bearer",
+      expires_at: Date.now() + 10 * 60_000,
+      scopes: [PLAN_SCOPE],
+      saved_at: new Date().toISOString(),
+    };
+    const bodies: Record<string, unknown>[] = [];
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = String(input);
+      if (url.includes("/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [
+              { slug: "gpt-6.1-sol", display_name: "GPT-6.1", visibility: "list" },
+              { slug: "gpt-5.4", display_name: "GPT-5.4", visibility: "none" },
+            ],
+          }),
+        );
+      }
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        [
+          `data: ${JSON.stringify({ type: "response.output_text.delta", delta: '{"criteria":[]}' })}\n\n`,
+          `data: ${JSON.stringify({ type: "response.completed", response: { model: "gpt-6.1-sol", usage: { input_tokens: 2, output_tokens: 1 } } })}\n\n`,
+        ].join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    };
+    const expected = draftLlmRequest("Need five years of Go.");
+    const result = await completeDraft(dual({ local: { chatgptAuth: auth } }), host(fetchImpl), "Need five years of Go.");
+    expect(result.model).toBe("gpt-6.1-sol");
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.model).toBe("gpt-6.1-sol");
+    expect(bodies[0]).not.toHaveProperty("instructions");
+    expect(bodies[0]?.store).toBe(false);
+    expect(bodies[0]?.stream).toBe(true);
+    expect(bodies[0]?.input).toEqual([{ role: "user", content: `${expected.instructions}\n\n${expected.input}` }]);
+  });
 });
 
 describe("completeCompare", () => {
@@ -106,11 +154,25 @@ describe("completeCompare", () => {
       saved_at: new Date().toISOString(),
     };
     const fetchImpl: typeof fetch = async (input, init) => {
-      expect(String(input)).toBe("https://api.openai.com/v1/responses");
+      const url = String(input);
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer chatgpt-access");
-      const body = JSON.parse(String(init?.body)) as { stream: boolean; instructions: string };
+      if (url.includes("/models")) {
+        return new Response(
+          JSON.stringify({
+            models: [{ slug: "gpt-5.4", display_name: "GPT-5.4", visibility: "list" }],
+          }),
+        );
+      }
+      expect(url).toBe("https://api.openai.com/v1/responses");
+      const expected = compareLlmRequest(sampleRubric, "profile");
+      const body = JSON.parse(String(init?.body)) as {
+        stream: boolean;
+        instructions?: string;
+        input: { content: string }[];
+      };
       expect(body.stream).toBe(true);
-      expect(body.instructions).toBe(compareLlmRequest(sampleRubric, "profile").instructions);
+      expect(body.instructions).toBeUndefined();
+      expect(body.input[0]?.content).toBe(`${expected.instructions}\n\n${expected.input}`);
       return new Response(
         [
           `data: ${JSON.stringify({ type: "response.output_text.delta", delta: '{"answers":[]}' })}\n\n`,

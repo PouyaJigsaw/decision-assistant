@@ -17,7 +17,7 @@ export interface LlmClient {
   }>;
   compare(input: { approvedText: string; criteria: Criterion[] }): Promise<{
     model: string;
-    excerpts: { criterionId: string; excerpt: string }[];
+    answers: { criterionId: string; result: string; confidence: number; excerpt: string }[];
     usage: TokenUsage;
   }>;
 }

@@ -14,6 +14,7 @@ describe("extractSections", () => {
     });
 
     expect(result.url).toBe("https://www.linkedin.com/in/alex");
+    expect(result.candidateName).toBe("Alex Rivera");
     expect(result.sections).toEqual([
       { id: "headline", title: "Headline", text: "Staff engineer, payments" },
       { id: "about", title: "About", text: "Builds Go services" },

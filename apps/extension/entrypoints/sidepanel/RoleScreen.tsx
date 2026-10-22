@@ -118,12 +118,15 @@ function draftErrorMessage(error: unknown): string {
     return `The connected model did not finish a rubric (${error.detail || error.code}). Nothing was sent to Jev. Wait and try again.`;
   }
   if (error instanceof ApiError) {
-    const code =
-      error.body && typeof error.body === "object" && "error" in error.body
-        ? String((error.body as { error: unknown }).error)
-        : "";
+    const body = error.body && typeof error.body === "object" ? (error.body as { error?: unknown; message?: unknown }) : {};
+    const code = typeof body.error === "string" ? body.error : "";
     if (code === "insufficient_notes" || error.status === 422) {
       return INSUFFICIENT_JOB_DESCRIPTION;
+    }
+    if (code === "trial_cap") {
+      return typeof body.message === "string"
+        ? body.message
+        : "This trial covered three job roles. Creating another is closed.";
     }
     if (code === "llm_failed" || error.status === 502) {
       return "The connected model did not finish a rubric. Nothing was sent to Jev. Wait and try again.";

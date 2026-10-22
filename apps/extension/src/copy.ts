@@ -79,9 +79,9 @@ export function chipLabel(result: string, confidence: number): string {
   return `${resultLabel(result)} · ${confidence.toFixed(2)}`;
 }
 
-export function usesRemainingCopy(usesRemaining: number | null, cap: number | null = 3): string {
-  if (usesRemaining == null || cap == null) return "Uses remaining: unlimited";
-  return `Uses remaining: ${usesRemaining} of ${cap}`;
+export function rolesRemainingCopy(rolesRemaining: number | null, cap: number | null = 3): string {
+  if (rolesRemaining == null || cap == null) return "";
+  return `Job roles remaining: ${rolesRemaining} of ${cap}`;
 }
 
 export function roleHeading(roleTitle?: string, company?: string): string {

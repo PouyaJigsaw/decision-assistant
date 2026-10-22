@@ -351,6 +351,31 @@ describe("RoleScreen", () => {
     expect(screen.queryByRole("heading", { name: "Drafting this rubric" })).toBeNull();
   });
 
+  it("shows the job-role trial sentence from a 409 body", async () => {
+    const user = userEvent.setup();
+    const draftRubric = vi.fn(async () => {
+      throw new ApiError(409, {
+        error: "trial_cap",
+        message: "This trial covered three job roles. Creating another is closed.",
+      });
+    });
+
+    render(<RoleScreen api={{ draftRubric }} onDrafted={() => undefined} />);
+
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(enoughJobDescription());
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("This trial covered three job roles. Creating another is closed.")).toBeTruthy();
+    });
+    expect(screen.queryByText("Connect ChatGPT or an API key to draft a rubric.")).toBeNull();
+  });
+
   it("explains when ChatGPT rejects the draft instead of a generic failure", async () => {
     const user = userEvent.setup();
     const draftRubric = vi.fn(async () => {
@@ -472,7 +497,7 @@ describe("RubricScreen", () => {
 const jevCost = costFromUsage({ inputTokens: 2180, outputTokens: 36 }, JEV_PRICE);
 
 describe("ResultScreen", () => {
-  it("shows the investigate recommendation, certainty lines, and uses remaining", () => {
+  it("shows the investigate recommendation and certainty lines", () => {
     render(
       <ResultScreen
         evaluation={{
@@ -546,7 +571,8 @@ describe("ResultScreen", () => {
     expect(screen.queryByText("Most of the cost is the language model.")).toBeNull();
     expect(screen.queryByText(/of spend/)).toBeNull();
     expect(screen.getByText("Jev does not write text. Its output tokens are counted and not billed.")).toBeTruthy();
-    expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
+    expect(screen.queryByText(/Job roles remaining/)).toBeNull();
   });
 
   it("shows the question, and a dealbreaker Yes as a negative finding", () => {
@@ -596,7 +622,6 @@ describe("ErrorScreen", () => {
     render(
       <ErrorScreen
         error={{ status: 502, body: { error: "jev_failed", reason: "invalid_jev", usesRemaining: 2 } }}
-        usesRemaining={2}
       />,
     );
 
@@ -614,13 +639,14 @@ describe("ErrorScreen", () => {
       <ErrorScreen
         error={{
           status: 409,
-          body: { error: "trial_cap", message: "This trial covered three profiles. Evaluate is closed." },
+          body: { error: "trial_cap", message: "This trial covered three job roles. Creating another is closed." },
         }}
-        usesRemaining={0}
       />,
     );
 
-    expect(screen.getByText("This trial covered three profiles. Evaluate is closed.")).toBeTruthy();
+    expect(screen.getByText("This trial covered three job roles. Creating another is closed.")).toBeTruthy();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
+    expect(screen.queryByText(/Job roles remaining/)).toBeNull();
   });
 
   it("makes Manage usage the primary action when ChatGPT plan usage is exhausted", async () => {
@@ -643,7 +669,6 @@ describe("ErrorScreen", () => {
     render(
       <ErrorScreen
         error={{ status: 503, body: { error: "daily_spend_cap" } }}
-        usesRemaining={2}
         onRetry={() => undefined}
       />,
     );
@@ -662,7 +687,6 @@ describe("ErrorScreen", () => {
     render(
       <ErrorScreen
         error={{ status: 503, body: { error: "evaluations_disabled" } }}
-        usesRemaining={2}
         onRetry={() => undefined}
       />,
     );
@@ -752,7 +776,7 @@ describe("HistoryScreen", () => {
     const list = vi.fn(async () => historyRows);
 
     render(
-      <HistoryScreen usesRemaining={0} api={{ list, deleteAll: async () => undefined }} onBack={onBack} />,
+      <HistoryScreen api={{ list, deleteAll: async () => undefined }} onBack={onBack} />,
     );
 
     expect(await screen.findByText("Running total")).toBeTruthy();
@@ -772,7 +796,7 @@ describe("HistoryScreen", () => {
       list.mockResolvedValueOnce({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
     });
 
-    render(<HistoryScreen usesRemaining={0} api={{ list, deleteAll }} />);
+    render(<HistoryScreen api={{ list, deleteAll }} />);
 
     expect(await screen.findByText("Running total")).toBeTruthy();
     expect(screen.getByText("Jev $0.0004")).toBeTruthy();
@@ -784,13 +808,14 @@ describe("HistoryScreen", () => {
     expect(screen.getAllByText("Jev $0.00009")).toHaveLength(2);
     expect(screen.queryByText("Jev $0.00009 · LLM $0.014")).toBeNull();
     expect(screen.queryByText("Jev $0.00009 · LLM off")).toBeNull();
-    expect(screen.getByText("Uses remaining: 0 of 3")).toBeTruthy();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
+    expect(screen.queryByText(/Job roles remaining/)).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Delete all history" }));
 
     expect(deleteAll).toHaveBeenCalledTimes(1);
     expect(screen.queryByText("Senior backend")).toBeNull();
-    expect(screen.getByText("Uses remaining: 0 of 3")).toBeTruthy();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
   });
 
   it("opens a success row and leaves a failed row untappable", async () => {
@@ -813,7 +838,7 @@ describe("HistoryScreen", () => {
     }));
 
     render(
-      <HistoryScreen usesRemaining={2} api={{ list, deleteAll: async () => undefined }} onOpen={onOpen} />,
+      <HistoryScreen api={{ list, deleteAll: async () => undefined }} onOpen={onOpen} />,
     );
 
     expect(await screen.findByText("Running total")).toBeTruthy();
@@ -921,7 +946,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[]}
@@ -931,7 +956,8 @@ describe("DashboardScreen", () => {
       />,
     );
 
-    expect(screen.getByText("Uses remaining: 2 of 3")).toBeTruthy();
+    expect(screen.getByText("Job roles remaining: 2 of 3")).toBeTruthy();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
     expect(screen.getByText("Jev $0.0004")).toBeTruthy();
     expect(screen.queryByText("LLM $0.041")).toBeNull();
     await user.click(screen.getByRole("button", { name: "New job description" }));
@@ -939,12 +965,12 @@ describe("DashboardScreen", () => {
     expect(screen.queryByRole("button", { name: "Back" })).toBeNull();
   });
 
-  it("shows a stored cap of 100 on the dashboard", () => {
+  it("shows a stored job-role cap of 100 on the dashboard", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={97}
-        cap={100}
+        rolesRemaining={97}
+        roleCap={100}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[]}
@@ -954,7 +980,26 @@ describe("DashboardScreen", () => {
       />,
     );
 
-    expect(screen.getByText("Uses remaining: 97 of 100")).toBeTruthy();
+    expect(screen.getByText("Job roles remaining: 97 of 100")).toBeTruthy();
+  });
+
+  it("hides job-role remaining when the cap is unlimited", () => {
+    render(
+      <DashboardScreen
+        email="recruiter@example.com"
+        rolesRemaining={null}
+        roleCap={null}
+        totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
+        roles={[]}
+        recent={[]}
+        onNewJob={() => undefined}
+        onOpen={() => undefined}
+        onSignOut={() => undefined}
+      />,
+    );
+
+    expect(screen.queryByText(/Job roles remaining/)).toBeNull();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
   });
 
   it("opens a success recent row and leaves a non-success row untappable", async () => {
@@ -964,7 +1009,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[...dashboardRecent]}
@@ -988,7 +1033,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[]}
@@ -1002,13 +1047,13 @@ describe("DashboardScreen", () => {
     expect(onSignOut).toHaveBeenCalledTimes(1);
   });
 
-  it("shows Continue only when a sitting is passed in", () => {
-    const { rerender } = render(
+  it("does not offer Continue sitting", () => {
+    render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
-        roles={[]}
+        roles={[{ id: "r1", title: "Staff Software Engineer", company: "Stripe" }]}
         recent={[]}
         onNewJob={() => undefined}
         onOpen={() => undefined}
@@ -1016,32 +1061,16 @@ describe("DashboardScreen", () => {
       />,
     );
 
-    expect(screen.queryByRole("button", { name: /Continue/ })).toBeNull();
-
-    rerender(
-      <DashboardScreen
-        email="recruiter@example.com"
-        usesRemaining={2}
-        totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
-        sitting={{ title: "Staff Software Engineer", company: "Stripe" }}
-        roles={[]}
-        recent={[]}
-        onNewJob={() => undefined}
-        onOpen={() => undefined}
-        onSignOut={() => undefined}
-      />,
-    );
-
-    expect(screen.getByRole("button", { name: /Continue/ })).toBeTruthy();
-    expect(screen.getByText("Staff Software Engineer")).toBeTruthy();
-    expect(screen.getByText("Stripe")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Continue sitting/ })).toBeNull();
+    expect(screen.getByRole("button", { name: "New job description" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Staff Software Engineer/ })).toBeTruthy();
   });
 
   it("shows company and a short job description on a saved role", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[
           {
@@ -1071,7 +1100,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[]}
@@ -1093,7 +1122,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[
           {
@@ -1139,7 +1168,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[
           {
@@ -1167,7 +1196,7 @@ describe("DashboardScreen", () => {
     render(
       <DashboardScreen
         email="recruiter@example.com"
-        usesRemaining={2}
+        rolesRemaining={2}
         totals={{ jevUsd: 0.0004, llmUsd: 0.041 }}
         roles={[]}
         recent={[{ ...dashboardRecent[0], candidateName: "Tim Glaser" }]}

@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createLiveJev } from "./live-jev";
 
 const profile = "Staff engineer. Led the payments API in Go for four years.";
-const JEV_URL = "https://api.typesafe.ai/v1/systemone";
+const JEV_URL = "https://api.defapi.org/api/v1/decisions";
 
 function evaluateInput() {
   const { model: _model, ...input } = toJevRequest(sampleRubric, profile);
@@ -11,7 +11,7 @@ function evaluateInput() {
 }
 
 describe("createLiveJev", () => {
-  it("posts once to TypeSafe with bearer auth and the toJevRequest body", async () => {
+  it("posts once to DefAPI decisions with bearer auth and the toJevRequest body", async () => {
     const recorded: { url: unknown; init?: RequestInit }[] = [];
     const payload = { model: "jev-1.13.0", answers: { go: { type: "choice" } }, extra: "untouched" };
     const fetchImpl: typeof fetch = async (url, init) => {
@@ -29,6 +29,7 @@ describe("createLiveJev", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
     const headers = new Headers(init?.headers);
     expect(headers.get("Authorization")).toBe("Bearer test-key");
+    expect(headers.get("Accept")).toBe("application/json");
     expect(headers.get("Content-Type")).toBe("application/json");
     const body = JSON.parse(String(init?.body)) as {
       model: string;
@@ -39,6 +40,17 @@ describe("createLiveJev", () => {
     expect(body.state).toBe(profile);
     expect(Object.keys(body.questions)).toEqual(sampleRubric.map((c) => c.id));
     expect(result).toEqual({ ok: true, model: "jev-1.13.0", payload });
+  });
+
+  it("rewrites a DefAPI model id to a versioned jev model", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(JSON.stringify({ model: "typesafe/jev-1.13-20260917", answers: {} }), { status: 200 });
+    const jev = createLiveJev({ apiKey: "test-key", model: "typesafe/jev-1.13", fetchImpl });
+    const result = await jev.evaluate(evaluateInput());
+    expect(result).toMatchObject({ ok: true, model: "jev-1.13.20260917" });
+    if (result.ok) {
+      expect((result.payload as { model: string }).model).toBe("jev-1.13.20260917");
+    }
   });
 
   it("returns the 200 JSON body as payload without parsing answers", async () => {

@@ -1,9 +1,10 @@
-# Deploy from the repo root: fly deploy -c apps/api/fly.toml
+# From the repo root: fly deploy -c apps/api/fly.toml
+# dockerfile is relative to this file, build context is the repo root.
 app = "decision-assistant"
 primary_region = "sjc"
 
 [build]
-  dockerfile = "apps/api/Dockerfile"
+  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"

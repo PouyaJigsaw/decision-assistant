@@ -1,4 +1,4 @@
-import { PRODUCT_NAME, usesRemainingCopy } from "../../src/copy";
+import { PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 export type PanelError = { status: number; body: unknown };
@@ -14,7 +14,7 @@ function errorMessage(error: PanelError) {
   if (body.error === "trial_cap") {
     return typeof body.message === "string"
       ? body.message
-      : "This trial covered three profiles. Evaluate is closed.";
+      : "This trial covered three job roles. Creating another is closed.";
   }
   if (body.error === "daily_spend_cap") {
     return "Today's spend limit is reached. Evaluate is closed.";
@@ -33,15 +33,11 @@ function errorMessage(error: PanelError) {
 
 export function ErrorScreen({
   error,
-  usesRemaining,
-  cap = 3,
   onRetry,
   onManageUsage,
   onBack,
 }: {
   error: PanelError;
-  usesRemaining?: number | null;
-  cap?: number | null;
   onRetry?: () => void;
   onManageUsage?: () => void;
   onBack?: () => void;
@@ -65,11 +61,6 @@ export function ErrorScreen({
       <div>
         <h2>{title}</h2>
         <p className="lede">{errorMessage(error)}</p>
-        {usesRemaining === undefined ? null : (
-          <p className="meter">
-            {usesRemainingCopy(usesRemaining, cap)}
-          </p>
-        )}
       </div>
       {usageLimit && onManageUsage ? (
         <button className="primary" type="button" onClick={onManageUsage}>

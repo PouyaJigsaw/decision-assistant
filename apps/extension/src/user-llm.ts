@@ -14,7 +14,14 @@ import {
   getConnection,
   type DualKv,
 } from "./llm-credentials";
-import { RESPONSES_URL, completeResponse, type Completion } from "./openai-responses";
+import {
+  RESPONSES_URL,
+  completeResponse,
+  listModels,
+  pickListedModel,
+  type Completion,
+  type ListedModel,
+} from "./openai-responses";
 
 export const SELECTED_MODEL_KEY = "openaiModel";
 const DEFAULT_MODEL = "gpt-5.4";
@@ -44,18 +51,37 @@ async function bearer(kv: DualKv, host: OAuthHost) {
   return cred;
 }
 
+export async function resolvePlanModel(
+  kv: DualKv,
+  opts: { token: string; fetchImpl?: typeof fetch },
+): Promise<ListedModel[]> {
+  const listed = await listModels({ token: opts.token, planUsage: true, fetchImpl: opts.fetchImpl });
+  const stored = await selectedModel(kv);
+  const next = pickListedModel(stored, listed);
+  if (next !== stored) await setSelectedModel(kv, next);
+  return listed;
+}
+
 async function complete(
   kv: DualKv,
   host: OAuthHost,
   request: { instructions: string; input: string; jsonSchema?: Record<string, unknown> },
 ): Promise<Completion> {
   const cred = await bearer(kv, host);
+  if (cred.planUsage) {
+    try {
+      await resolvePlanModel(kv, { token: cred.token, fetchImpl: host.fetch });
+    } catch {
+      // Keep the stored slug if the catalog request fails; the Responses call will surface the error.
+    }
+  }
   return completeResponse({
     token: cred.token,
     model: await selectedModel(kv),
     instructions: request.instructions,
     input: request.input,
     stream: cred.stream,
+    planUsage: cred.planUsage,
     jsonSchema: request.jsonSchema,
     fetchImpl: host.fetch,
   });

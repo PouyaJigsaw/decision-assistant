@@ -1,0 +1,16 @@
+.git
+.chrome-e2e-profile
+node_modules
+**/node_modules
+data
+dist
+.output
+.wxt
+apps/extension
+e2e
+**/.env
+**/.env.*
+!.env.example
+.cursor
+.vscode
+*.md

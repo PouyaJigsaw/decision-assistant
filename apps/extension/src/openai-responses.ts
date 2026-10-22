@@ -7,8 +7,9 @@ export class OpenAiError extends Error {
     readonly code: string,
     readonly status: number,
     readonly manageUsage: boolean,
+    readonly detail?: string,
   ) {
-    super(code);
+    super(detail || code);
   }
 }
 
@@ -26,10 +27,18 @@ const USAGE_LIMIT_CODES = new Set([
   "subscription_sharing_usage_unavailable",
 ]);
 
+function diagnostic(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const row = payload as { detail?: unknown; error?: { message?: unknown } };
+  if (typeof row.detail === "string" && row.detail.trim()) return row.detail.trim();
+  if (typeof row.error?.message === "string" && row.error.message.trim()) return row.error.message.trim();
+  return undefined;
+}
+
 function asError(payload: unknown, status: number): OpenAiError {
   const record = payload && typeof payload === "object" ? (payload as { error?: { code?: unknown } }) : {};
   const code = typeof record.error?.code === "string" ? record.error.code : status === 429 ? "rate_limited" : "openai_failed";
-  return new OpenAiError(code, status, USAGE_LIMIT_CODES.has(code));
+  return new OpenAiError(code, status, USAGE_LIMIT_CODES.has(code), diagnostic(payload));
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -72,20 +81,31 @@ export async function listModels(opts: {
     .filter((item) => item.slug);
 }
 
+export function pickListedModel(stored: string, listed: ListedModel[]): string {
+  if (listed.some((model) => model.slug === stored)) return stored;
+  return listed[0]?.slug ?? stored;
+}
+
 function requestBody(opts: {
   model: string;
   instructions: string;
   input: string;
   stream: boolean;
+  planUsage?: boolean;
   jsonSchema?: Record<string, unknown>;
 }) {
   const body: Record<string, unknown> = {
     model: opts.model,
-    instructions: opts.instructions,
-    input: [{ role: "user", content: opts.input }],
+    input: [
+      {
+        role: "user",
+        content: opts.planUsage ? `${opts.instructions}\n\n${opts.input}` : opts.input,
+      },
+    ],
     store: false,
     stream: opts.stream,
   };
+  if (!opts.planUsage) body.instructions = opts.instructions;
   if (opts.jsonSchema) {
     body.text = { format: { type: "json_schema", name: "result", schema: opts.jsonSchema, strict: true } };
   }
@@ -140,7 +160,11 @@ async function readStream(response: Response): Promise<Completion> {
         let event: {
           type?: string;
           delta?: unknown;
-          response?: { error?: { code?: unknown }; model?: unknown; usage?: { input_tokens?: unknown; output_tokens?: unknown } };
+          response?: {
+            error?: { code?: unknown; message?: unknown };
+            model?: unknown;
+            usage?: { input_tokens?: unknown; output_tokens?: unknown };
+          };
         };
         try {
           event = JSON.parse(data) as typeof event;
@@ -152,7 +176,9 @@ async function readStream(response: Response): Promise<Completion> {
         }
         if (event.type === "response.failed") {
           const code = typeof event.response?.error?.code === "string" ? event.response.error.code : "openai_failed";
-          throw new OpenAiError(code, 400, USAGE_LIMIT_CODES.has(code));
+          const detail =
+            typeof event.response?.error?.message === "string" ? event.response.error.message : undefined;
+          throw new OpenAiError(code, 400, USAGE_LIMIT_CODES.has(code), detail);
         }
         if (event.type === "response.completed") {
           const usage = event.response?.usage;
@@ -176,6 +202,7 @@ export async function completeResponse(opts: {
   instructions: string;
   input: string;
   stream: boolean;
+  planUsage?: boolean;
   jsonSchema?: Record<string, unknown>;
   fetchImpl?: typeof fetch;
 }): Promise<Completion> {

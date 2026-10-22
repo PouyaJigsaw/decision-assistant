@@ -91,6 +91,47 @@ function contactProviders() {
   };
 }
 
+const HOSTED_DRAFT_CRITERIA = [
+  { kind: "requirement" as const, label: "Go", prompt: "Is there evidence of Go?" },
+  { kind: "preference" as const, label: "Team", prompt: "Does the candidate mention cultural fit?" },
+  {
+    kind: "disqualifier" as const,
+    label: "No ownership",
+    prompt: "Has the candidate never owned production systems?",
+  },
+];
+
+function hostedDraftLlm() {
+  return new FakeLlm({
+    draftRubric() {
+      return {
+        model: "fake-llm",
+        criteria: HOSTED_DRAFT_CRITERIA,
+        usage: { inputTokens: 1842, outputTokens: 610 },
+      };
+    },
+  });
+}
+
+async function createRole(app: Hono<any>, headers: Record<string, string>, title = "Senior backend engineer") {
+  const created = await app.request("/v1/roles", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ title }),
+  });
+  return created.json() as Promise<{ id: string; title: string }>;
+}
+
+async function draftHostedRole(app: Hono<any>, headers: Record<string, string>, title: string) {
+  const role = await createRole(app, headers, title);
+  const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ notes: enoughNotes() }),
+  });
+  return { role, draft };
+}
+
 async function approveRubric(app: Hono<any>, headers: Record<string, string>) {
   const created = await app.request("/v1/roles", {
     method: "POST",
@@ -144,6 +185,32 @@ describe("GET /v1/health", () => {
   });
 });
 
+describe("public pages", () => {
+  it("serves the store listing and privacy policy as HTML", async () => {
+    const { app, jev, llm } = createTestApp();
+    const home = await app.request("/");
+    expect(home.status).toBe(200);
+    expect(home.headers.get("content-type")).toMatch(/text\/html/);
+    const homeBody = await home.text();
+    expect(homeBody).toContain("Who Fits?");
+    expect(homeBody).toContain("Screen a LinkedIn profile against a job rubric.");
+    expect(homeBody).toContain("/privacy");
+
+    const privacy = await app.request("/privacy");
+    expect(privacy.status).toBe(200);
+    expect(privacy.headers.get("content-type")).toMatch(/text\/html/);
+    const privacyBody = await privacy.text();
+    expect(privacyBody).toContain("Privacy policy");
+    expect(privacyBody).toContain("TypeSafe");
+    expect(privacyBody).toContain("OpenAI");
+    expect(privacyBody).toContain("decision-assistant.fly.dev");
+    expect(privacyBody).toContain("pouya__1__pournasir@hotmail.com");
+    expect(privacyBody).not.toContain("contact the publisher through the Chrome Web Store listing");
+    expect(jev.calls).toBe(0);
+    expect(llm.calls).toBe(0);
+  });
+});
+
 describe("CORS for the WXT side panel", () => {
   it("answers a preflight from the Vite origin and does not reflect unknown origins", async () => {
     const { app } = createTestApp();
@@ -193,8 +260,10 @@ describe("POST /v1/users", () => {
     expect(await me.json()).toEqual({
       email: "new.user@example.com",
       successCount: 0,
-      usesRemaining: 3,
-      cap: 3,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 3,
+      roleCap: 3,
     });
   });
 
@@ -277,8 +346,10 @@ describe("POST /v1/session", () => {
     expect(await me.json()).toEqual({
       email: "recruiter@example.com",
       successCount: 0,
-      usesRemaining: 3,
-      cap: 3,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 3,
+      roleCap: 3,
     });
 
     const anonymous = await app.request("/v1/me");
@@ -619,22 +690,164 @@ describe("POST /v1/roles/:roleId/rubric-drafts", () => {
 
     expect(db.select().from(trialUses).all()).toEqual([]);
     const me = await app.request("/v1/me", { headers });
-    expect(await me.json()).toMatchObject({ successCount: 0, usesRemaining: 3 });
+    expect(await me.json()).toMatchObject({
+      successCount: 0,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 3,
+      roleCap: 3,
+    });
   });
 
-  it("rejects a draft without a client completion", async () => {
-    const { app, llm } = createTestApp();
+  it("drafts via the hosted model and spends one role slot", async () => {
+    const llm = hostedDraftLlm();
+    const { app } = createTestApp({ llm });
     const { headers } = await signIn(app);
-    const created = await app.request("/v1/roles", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({ title: "Senior backend engineer" }),
+    const { draft } = await draftHostedRole(app, headers, "Senior backend engineer");
+    expect(draft.status).toBe(201);
+    expect(await draft.json()).toEqual({
+      criteria: [
+        { id: "c1", kind: "requirement", label: "Go", prompt: "Is there evidence of Go?" },
+        {
+          id: "c2",
+          kind: "disqualifier",
+          label: "No ownership",
+          prompt: "Has the candidate never owned production systems?",
+        },
+      ],
+      omitted: ["cultural fit"],
+      usage: { inputTokens: 1842, outputTokens: 610 },
+      cost: { inputUsd: 0, outputUsd: 0, totalUsd: 0 },
     });
-    const role = await created.json();
-    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+    expect(llm.calls).toBe(1);
+    const me = await app.request("/v1/me", { headers });
+    expect(await me.json()).toMatchObject({
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 2,
+      roleCap: 3,
+    });
+  });
+
+  it("redrafts a hosted role without spending another slot", async () => {
+    const llm = hostedDraftLlm();
+    const { app } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const first = await draftHostedRole(app, headers, "Role one");
+    expect(first.draft.status).toBe(201);
+    const redraft = await app.request(`/v1/roles/${first.role.id}/rubric-drafts`, {
       method: "POST",
       headers,
       body: JSON.stringify({ notes: enoughNotes() }),
+    });
+    expect(redraft.status).toBe(201);
+    expect(llm.calls).toBe(2);
+    await draftHostedRole(app, headers, "Role two");
+    await draftHostedRole(app, headers, "Role three");
+    const fourth = await draftHostedRole(app, headers, "Role four");
+    expect(fourth.draft.status).toBe(409);
+    expect(await fourth.draft.json()).toEqual({
+      error: "trial_cap",
+      message: "This trial covered three job roles. Creating another is closed.",
+    });
+    expect(llm.calls).toBe(4);
+  });
+
+  it("refuses a fourth new hosted role and keeps the ledger after delete", async () => {
+    const llm = hostedDraftLlm();
+    const { app } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    for (const title of ["Role one", "Role two", "Role three"]) {
+      const { draft } = await draftHostedRole(app, headers, title);
+      expect(draft.status).toBe(201);
+    }
+    expect(llm.calls).toBe(3);
+    const fourth = await draftHostedRole(app, headers, "Role four");
+    expect(fourth.draft.status).toBe(409);
+    expect(await fourth.draft.json()).toEqual({
+      error: "trial_cap",
+      message: "This trial covered three job roles. Creating another is closed.",
+    });
+    expect(llm.calls).toBe(3);
+
+    const wiped = await app.request("/v1/roles", { method: "DELETE", headers });
+    expect(wiped.status).toBe(204);
+    const fifth = await draftHostedRole(app, headers, "Role five");
+    expect(fifth.draft.status).toBe(409);
+    expect(llm.calls).toBe(3);
+
+    const ownModel = await createRole(app, headers, "Own model role");
+    const ownDraft = await app.request(`/v1/roles/${ownModel.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: enoughNotes(), completion: draftCompletion() }),
+    });
+    expect(ownDraft.status).toBe(201);
+    expect(llm.calls).toBe(3);
+  });
+
+  it("does not spend a hosted slot when the hosted model fails", async () => {
+    let fail = true;
+    const llm = new FakeLlm({
+      draftRubric() {
+        if (fail) {
+          fail = false;
+          throw new Error("llm_failed");
+        }
+        return {
+          model: "fake-llm",
+          criteria: HOSTED_DRAFT_CRITERIA,
+          usage: { inputTokens: 1842, outputTokens: 610 },
+        };
+      },
+    });
+    const { app } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const failed = await draftHostedRole(app, headers, "Broken role");
+    expect(failed.draft.status).toBe(502);
+    expect(await failed.draft.json()).toEqual({ error: "llm_failed" });
+    for (const title of ["Role one", "Role two", "Role three"]) {
+      const { draft } = await draftHostedRole(app, headers, title);
+      expect(draft.status).toBe(201);
+    }
+    const fourth = await draftHostedRole(app, headers, "Role four");
+    expect(fourth.draft.status).toBe(409);
+    expect(llm.calls).toBe(4);
+  });
+
+  it("lets a stored cap of 100 host more than three role drafts", async () => {
+    const llm = hostedDraftLlm();
+    const { app, db } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const user = db.select().from(users).where(eq(users.email, "recruiter@example.com")).get();
+    db.update(users).set({ trialSuccessCap: 100 }).where(eq(users.id, user!.id)).run();
+    for (const title of ["Role one", "Role two", "Role three", "Role four"]) {
+      const { draft } = await draftHostedRole(app, headers, title);
+      expect(draft.status).toBe(201);
+    }
+    expect(llm.calls).toBe(4);
+  });
+
+  it("keeps hosted drafts open when the trial cap is unlimited", async () => {
+    const llm = hostedDraftLlm();
+    const { app } = createTestApp({ llm, env: { trialSuccessCap: null } });
+    const { headers } = await signIn(app);
+    for (const title of ["Role one", "Role two", "Role three", "Role four"]) {
+      const { draft } = await draftHostedRole(app, headers, title);
+      expect(draft.status).toBe(201);
+    }
+    expect(llm.calls).toBe(4);
+  });
+
+  it("rejects a malformed client completion without calling the hosted model", async () => {
+    const llm = hostedDraftLlm();
+    const { app } = createTestApp({ llm });
+    const { headers } = await signIn(app);
+    const role = await createRole(app, headers);
+    const draft = await app.request(`/v1/roles/${role.id}/rubric-drafts`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ notes: enoughNotes(), completion: { model: "gpt-5.4" } }),
     });
     expect(draft.status).toBe(400);
     expect(await draft.json()).toEqual({ error: "llm_completion_required" });
@@ -736,7 +949,7 @@ describe("POST /v1/evaluations", () => {
       status: "success",
       action: "contact",
       countsAsUse: true,
-      usesRemaining: 2,
+      usesRemaining: null,
       replayed: false,
       jev: { model: "jev-1.13.0", cost: { outputUsd: 0 } },
     });
@@ -845,7 +1058,7 @@ describe("POST /v1/evaluations", () => {
     expect(await res.json()).toMatchObject({
       error: "jev_failed",
       reason: "invalid_jev",
-      usesRemaining: 3,
+      usesRemaining: null,
     });
     expect(llm.calls).toBe(0);
   });
@@ -864,7 +1077,7 @@ describe("POST /v1/evaluations", () => {
     const created = await res.json();
     expect(created).toMatchObject({
       countsAsUse: true,
-      usesRemaining: 2,
+      usesRemaining: null,
     });
     const compared = await app.request(`/v1/evaluations/${created.id}/comparison`, {
       method: "POST",
@@ -918,7 +1131,7 @@ describe("POST /v1/evaluations", () => {
     expect(await replay.json()).toMatchObject({
       id: original.id,
       replayed: true,
-      usesRemaining: 2,
+      usesRemaining: null,
     });
     expect(jev.calls).toBe(1);
   });
@@ -1045,7 +1258,7 @@ describe("POST /v1/evaluations", () => {
     });
     expect(failed.status).toBe(502);
     const failure = await failed.json();
-    expect(failure).toMatchObject({ error: "jev_failed", reason: "timeout", usesRemaining: 3 });
+    expect(failure).toMatchObject({ error: "jev_failed", reason: "timeout", usesRemaining: null });
     expect(failure.id).toEqual(expect.any(String));
     const failedRow = getEvaluation(db, failure.id);
     expect(failedRow).toMatchObject({ status: "jev_failed", countsAsUse: 0 });
@@ -1057,7 +1270,7 @@ describe("POST /v1/evaluations", () => {
       body: JSON.stringify(payload),
     });
     expect(retried.status).toBe(200);
-    expect(await retried.json()).toMatchObject({ id: failure.id, usesRemaining: 2, status: "success" });
+    expect(await retried.json()).toMatchObject({ id: failure.id, usesRemaining: null, status: "success" });
     expect(db.select().from(evaluations).all()).toHaveLength(1);
     expect(jev.calls).toBe(2);
   });
@@ -1078,9 +1291,9 @@ describe("POST /v1/evaluations", () => {
     expect(db.select().from(evaluations).all()).toEqual([]);
   });
 
-  it("refuses a fourth success, keeps the ledger after delete, and still blocks a fifth", async () => {
+  it("keeps evaluate open after three successes", async () => {
     const { jev, llm } = contactProviders();
-    const { app, db } = createTestApp({ jev, llm });
+    const { app } = createTestApp({ jev, llm });
     const { headers } = await signIn(app);
     const { role, rubric } = await approveRubric(app, headers);
     const keys = [
@@ -1088,46 +1301,25 @@ describe("POST /v1/evaluations", () => {
       "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
       "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-      "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
     ];
-    for (const key of keys.slice(0, 3)) {
+    for (const key of keys) {
       const res = await app.request("/v1/evaluations", {
         method: "POST",
         headers: { ...headers, "Idempotency-Key": key },
         body: JSON.stringify(evaluateBody(role.id, rubric.id)),
       });
       expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ usesRemaining: null });
     }
-    expect(jev.calls).toBe(3);
-
-    const fourth = await app.request("/v1/evaluations", {
-      method: "POST",
-      headers: { ...headers, "Idempotency-Key": keys[3]! },
-      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
-    });
-    expect(fourth.status).toBe(409);
-    expect(await fourth.json()).toEqual({
-      error: "trial_cap",
-      message: "This trial covered three profiles. Evaluate is closed.",
-    });
-    expect(jev.calls).toBe(3);
-    expect(db.select().from(evaluations).all().some((row) => row.status === "refused_cap" && row.countsAsUse === 0)).toBe(
-      true,
-    );
-
-    const wiped = await app.request("/v1/evaluations", { method: "DELETE", headers });
-    expect(wiped.status).toBe(204);
-    expect(db.select().from(evaluations).all()).toEqual([]);
+    expect(jev.calls).toBe(4);
     const me = await app.request("/v1/me", { headers });
-    expect(await me.json()).toMatchObject({ successCount: 3, usesRemaining: 0 });
-
-    const fifth = await app.request("/v1/evaluations", {
-      method: "POST",
-      headers: { ...headers, "Idempotency-Key": keys[4]! },
-      body: JSON.stringify(evaluateBody(role.id, rubric.id)),
+    expect(await me.json()).toMatchObject({
+      successCount: 4,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 3,
+      roleCap: 3,
     });
-    expect(fifth.status).toBe(409);
-    expect(jev.calls).toBe(3);
   });
 
   it("lets a user with a stored cap of 100 evaluate after three successes", async () => {
@@ -1151,7 +1343,13 @@ describe("POST /v1/evaluations", () => {
     expect(evaluated.status).toBe(200);
 
     const me = await app.request("/v1/me", { headers });
-    expect(await me.json()).toMatchObject({ successCount: 4, usesRemaining: 96, cap: 100 });
+    expect(await me.json()).toMatchObject({
+      successCount: 4,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 100,
+      roleCap: 100,
+    });
   });
 
   it("keeps evaluate open after three successes when the trial cap is unlimited", async () => {
@@ -1174,7 +1372,13 @@ describe("POST /v1/evaluations", () => {
     }
     expect(jev.calls).toBe(4);
     const me = await app.request("/v1/me", { headers });
-    expect(await me.json()).toMatchObject({ successCount: 4, usesRemaining: null, cap: null });
+    expect(await me.json()).toMatchObject({
+      successCount: 4,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: null,
+      roleCap: null,
+    });
   });
 
   it("records a correction, notes, history totals, and a single-row delete", async () => {
@@ -1228,7 +1432,13 @@ describe("POST /v1/evaluations", () => {
     expect(removed.status).toBe(204);
     expect(getEvaluation(db, created.id)).toBeUndefined();
     const me = await app.request("/v1/me", { headers });
-    expect(await me.json()).toMatchObject({ successCount: 1, usesRemaining: 2 });
+    expect(await me.json()).toMatchObject({
+      successCount: 1,
+      usesRemaining: null,
+      cap: null,
+      rolesRemaining: 3,
+      roleCap: 3,
+    });
   });
 });
 

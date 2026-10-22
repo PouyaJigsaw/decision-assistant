@@ -35,7 +35,12 @@ export function sessionExpiresAt(now = Date.now()): number {
 
 export function seedUser(db: AppDatabase, env: Env) {
   const existing = db.select().from(users).where(eq(users.email, env.accountEmail)).get();
-  if (existing) return existing;
+  if (existing) {
+    if (verifyPassword(env.accountPassword, existing.passwordHash)) return existing;
+    const passwordHash = hashPassword(env.accountPassword);
+    db.update(users).set({ passwordHash }).where(eq(users.id, existing.id)).run();
+    return { ...existing, passwordHash };
+  }
   const row = {
     id: crypto.randomUUID(),
     email: env.accountEmail,
@@ -47,7 +52,7 @@ export function seedUser(db: AppDatabase, env: Env) {
 }
 
 export function findUserByEmail(db: AppDatabase, email: string) {
-  return db.select().from(users).where(eq(users.email, email)).get();
+  return db.select().from(users).where(eq(users.email, email.trim().toLowerCase())).get();
 }
 
 export function createSession(db: AppDatabase, userId: string) {

@@ -6,11 +6,24 @@ import {
   RESPONSES_URL,
   completeResponse,
   listModels,
+  pickListedModel,
 } from "./openai-responses";
 
 function sse(events: unknown[]): string {
   return events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join("") + "data: [DONE]\n\n";
 }
+
+describe("pickListedModel", () => {
+  it("keeps a stored slug that is still listed, otherwise the first catalog slug", () => {
+    const listed = [
+      { slug: "gpt-6.1-sol", display_name: "GPT-6.1" },
+      { slug: "gpt-5.4", display_name: "GPT-5.4" },
+    ];
+    expect(pickListedModel("gpt-5.4", listed)).toBe("gpt-5.4");
+    expect(pickListedModel("gpt-5.4", listed.slice(0, 1))).toBe("gpt-6.1-sol");
+    expect(pickListedModel("gpt-5.4", [])).toBe("gpt-5.4");
+  });
+});
 
 describe("listModels", () => {
   it("shows list-visible slugs for a ChatGPT token", async () => {
@@ -145,6 +158,94 @@ describe("completeResponse", () => {
     });
     expect(bodies[1]).toBeUndefined();
     expect(result.text).toBe('{"answers":[]}');
+  });
+
+  it("omits instructions on ChatGPT plan usage and folds them into the user input", async () => {
+    const fetchImpl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body)) as {
+        instructions?: unknown;
+        input: { role: string; content: string }[];
+        store: boolean;
+        stream: boolean;
+      };
+      expect("instructions" in body).toBe(false);
+      expect(body.store).toBe(false);
+      expect(body.stream).toBe(true);
+      expect(body.input[0]).toEqual({
+        role: "user",
+        content: "Return JSON\n\nnotes",
+      });
+      return new Response(
+        sse([
+          { type: "response.output_text.delta", delta: '{"ok":true}' },
+          {
+            type: "response.completed",
+            response: { model: "gpt-6.1-sol", usage: { input_tokens: 2, output_tokens: 1 } },
+          },
+        ]),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    };
+    await expect(
+      completeResponse({
+        token: "chatgpt-access",
+        model: "gpt-6.1-sol",
+        instructions: "Return JSON",
+        input: "notes",
+        stream: true,
+        planUsage: true,
+        fetchImpl,
+      }),
+    ).resolves.toMatchObject({ text: '{"ok":true}' });
+  });
+
+  it("keeps the admission detail when ChatGPT rejects the request without error.code", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(JSON.stringify({ detail: "Direct routing is not enabled for this client." }), { status: 503 });
+    await expect(
+      completeResponse({
+        token: "chatgpt-access",
+        model: "gpt-5.4",
+        instructions: "Return JSON",
+        input: "notes",
+        stream: true,
+        planUsage: true,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({
+      name: "OpenAiError",
+      code: "openai_failed",
+      status: 503,
+      detail: "Direct routing is not enabled for this client.",
+    } satisfies Partial<OpenAiError>);
+  });
+
+  it("keeps error.message when OpenAI returns a null error.code", async () => {
+    const fetchImpl: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "The model `gpt-5.4` does not exist or you do not have access to it.",
+            code: null,
+          },
+        }),
+        { status: 400 },
+      );
+    await expect(
+      completeResponse({
+        token: "chatgpt-access",
+        model: "gpt-5.4",
+        instructions: "Return JSON",
+        input: "notes",
+        stream: true,
+        planUsage: true,
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({
+      name: "OpenAiError",
+      code: "openai_failed",
+      detail: "The model `gpt-5.4` does not exist or you do not have access to it.",
+    } satisfies Partial<OpenAiError>);
   });
 
   it("surfaces a usage-limit error without retrying another credential", async () => {

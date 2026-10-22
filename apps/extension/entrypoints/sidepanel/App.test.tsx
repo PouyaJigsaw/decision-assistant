@@ -66,7 +66,23 @@ vi.stubGlobal("chrome", {
     create: async () => ({ id: 1 }),
     update: async () => ({ id: 1 }),
     remove: async () => undefined,
+    query: async () => [{ id: 7, url: "https://www.linkedin.com/in/one", lastAccessed: 1 }],
     onUpdated: { addListener() {}, removeListener() {} },
+  },
+  scripting: {
+    executeScript: async () => [
+      {
+        result: {
+          title: "One",
+          url: "https://www.linkedin.com/in/one",
+          headings: [
+            { level: 2, text: "Headline", body: "Staff engineer" },
+            { level: 2, text: "About", body: "Builds Go services" },
+            { level: 2, text: "Experience", body: "four years" },
+          ],
+        },
+      },
+    ],
   },
   webNavigation: {
     onBeforeNavigate: { addListener() {}, removeListener() {} },
@@ -96,6 +112,18 @@ function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 }
 
+const savedRole = { id: "role-1", title: "Senior backend" };
+const currentRubric = {
+  id: "rubric-1",
+  title: "Senior backend",
+  criteria: [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }],
+};
+
+async function readSavedRole(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole("button", { name: "Senior backend" }));
+  await user.click(await screen.findByRole("button", { name: "Read this tab" }));
+}
+
 describe("App sitting flow", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -109,8 +137,16 @@ describe("App sitting flow", () => {
     chromeState.session.extract = extract;
     fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
-      if (url.endsWith("/v1/roles")) return json({ roles: [] });
+      if (url.endsWith("/v1/me")) return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+      if (url.endsWith("/v1/roles/role-1/rubrics/current")) return json(currentRubric);
+      if (url.endsWith("/v1/roles")) return json({ roles: [savedRole] });
       if (url.endsWith("/v1/evaluations") && init?.method !== "POST") {
         return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
       }
@@ -137,11 +173,15 @@ describe("App sitting flow", () => {
     vi.restoreAllMocks();
   });
 
-  it("evaluates a stored extract from Continue, Retry re-runs it, and a later extract does not navigate", async () => {
+  it("evaluates the open tab from a saved role, Retry re-runs it, and a later extract does not navigate", async () => {
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    expect(await screen.findByRole("button", { name: "New job description" })).toBeTruthy();
+    expect(screen.queryByText(/Job roles remaining/)).toBeNull();
+    expect(screen.queryByText(/Uses remaining/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Continue sitting/ })).toBeNull();
+    await readSavedRole(user);
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
     expect(screen.queryByRole("heading", { name: "Preview the extract" })).toBeNull();
@@ -179,8 +219,16 @@ describe("App sitting flow", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
-        if (url.endsWith("/v1/roles")) return json({ roles: [] });
+        if (url.endsWith("/v1/me")) return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+        if (url.endsWith("/v1/roles/role-1/rubrics/current")) return json(currentRubric);
+        if (url.endsWith("/v1/roles")) return json({ roles: [savedRole] });
         if (url.endsWith("/v1/evaluations") && init?.method !== "POST") {
           return json({
             evaluations: [
@@ -214,7 +262,7 @@ describe("App sitting flow", () => {
     );
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    await readSavedRole(user);
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "History" }));
     expect(await screen.findByRole("heading", { name: "Running total" })).toBeTruthy();
@@ -227,8 +275,16 @@ describe("App sitting flow", () => {
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
-        if (url.endsWith("/v1/roles")) return json({ roles: [] });
+        if (url.endsWith("/v1/me")) return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+        if (url.endsWith("/v1/roles/role-1/rubrics/current")) return json(currentRubric);
+        if (url.endsWith("/v1/roles")) return json({ roles: [savedRole] });
         if (url.endsWith("/v1/evaluations/e1") && init?.method !== "POST") {
           return json({
             id: "e1",
@@ -277,7 +333,7 @@ describe("App sitting flow", () => {
     );
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    await readSavedRole(user);
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "History" }));
     expect(await screen.findByRole("heading", { name: "Running total" })).toBeTruthy();
@@ -290,7 +346,7 @@ describe("App sitting flow", () => {
   it("returns to the job description from a result", async () => {
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    await readSavedRole(user);
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     await user.click(screen.getByRole("button", { name: "Change job description" }));
     expect(await screen.findByRole("heading", { name: "Saved roles" })).toBeTruthy();
@@ -300,15 +356,27 @@ describe("App sitting flow", () => {
   it("shows an error when evaluate cannot reach the API", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
-        if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
+        if (url.endsWith("/v1/me")) return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+        if (url.endsWith("/v1/roles/role-1/rubrics/current")) return json(currentRubric);
+        if (url.endsWith("/v1/roles")) return json({ roles: [savedRole] });
+        if (url.endsWith("/v1/evaluations") && init?.method !== "POST") {
+          return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
+        }
         throw new TypeError("Failed to fetch");
       }),
     );
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    await readSavedRole(user);
     expect(await screen.findByText("Evaluation failed")).toBeTruthy();
     expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
   });
@@ -334,7 +402,16 @@ describe("App sign up", () => {
         });
         return json({ token: "tok-signup", expiresAt: "2099-01-01T00:00:00.000Z" }, 201);
       }
-      if (url.endsWith("/v1/me")) return json({ email: "new.user@example.com", usesRemaining: 3, successCount: 0, cap: 3 });
+      if (url.endsWith("/v1/me")) {
+        return json({
+          email: "new.user@example.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+      }
       if (url.endsWith("/v1/roles")) return json({ roles: [] });
       if (url.endsWith("/v1/evaluations")) return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
       throw new Error(url);
@@ -391,7 +468,14 @@ function dashboardFetch(init?: RequestInit) {
     if (url.endsWith("/v1/session") && requestInit?.method === "POST") {
       return json({ token: "tok-1", expiresAt: "2099-01-01T00:00:00.000Z" });
     }
-    if (url.endsWith("/v1/me")) return json({ email: "r@x.com", usesRemaining: 3, successCount: 0, cap: 3 });
+    if (url.endsWith("/v1/me")) return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
     if (url.endsWith("/v1/roles/role-1/rubrics/current")) {
       return json({
         id: "rv1",
@@ -489,19 +573,18 @@ describe("App dashboard", () => {
     expect(screen.queryByRole("heading", { name: "Create a role" })).toBeNull();
   });
 
-  it("evaluates from Continue when a rubric and extract are stored", async () => {
+  it("evaluates from Read this tab after opening a saved role", async () => {
     chromeState.reset();
     chromeState.local.sessionToken = "tok-1";
     chromeState.session.openaiApiKey = "sk-test";
-    chromeState.session.panelRole = { id: "role-1", title: "Senior backend" };
-    chromeState.session.panelRubricId = "rubric-1";
-    chromeState.session.panelCriteria = [{ id: "go", kind: "requirement", label: "Go", prompt: "Go?" }];
-    chromeState.session.extract = extract;
     vi.stubGlobal("fetch", dashboardFetch());
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: /Continue/ }));
+    expect(await screen.findByRole("button", { name: "New job description" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /Continue sitting/ })).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Stripe/ }));
+    await user.click(await screen.findByRole("button", { name: "Read this tab" }));
     expect(await screen.findByRole("heading", { name: "Investigate" })).toBeTruthy();
     expect(screen.queryByText("Nothing is uploaded until you confirm.")).toBeNull();
   });
@@ -581,5 +664,63 @@ describe("App dashboard", () => {
     await user.click(screen.getByRole("button", { name: "Back" }));
     expect(await screen.findByRole("heading", { name: "Saved roles" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "New job description" })).toBeTruthy();
+  });
+
+  it("drafts a hosted rubric without a connected model", async () => {
+    chromeState.reset();
+    chromeState.local.sessionToken = "tok-1";
+    const notes = Array.from({ length: 150 }, (_, index) => `requirement${index}`).join(" ");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/me")) {
+        return json({
+          email: "r@x.com",
+          usesRemaining: null,
+          successCount: 0,
+          cap: null,
+          rolesRemaining: 3,
+          roleCap: 3,
+        });
+      }
+      if (url.endsWith("/v1/roles") && init?.method === "POST") {
+        expect("completion" in JSON.parse(String(init.body))).toBe(false);
+        return json({ id: "role-new", title: "Senior backend", company: "Stripe" }, 201);
+      }
+      if (url.endsWith("/v1/roles")) return json({ roles: [] });
+      if (url.endsWith("/v1/evaluations")) return json({ evaluations: [], totals: { jevUsd: 0, llmUsd: 0 } });
+      if (url.endsWith("/v1/roles/role-new/rubric-drafts") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          notes,
+          title: "Senior backend",
+          company: "Stripe",
+        });
+        return json(
+          {
+            criteria: [{ id: "c1", kind: "requirement", label: "Go", prompt: "Go?" }],
+            omitted: [],
+            usage: { inputTokens: 10, outputTokens: 4 },
+            cost: { totalUsd: 0 },
+          },
+          201,
+        );
+      }
+      throw new Error(url);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByText("Job roles remaining: 3 of 3")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "New job description" }));
+    await user.click(screen.getByLabelText("Role name"));
+    await user.paste("Senior backend");
+    await user.click(screen.getByLabelText("Company"));
+    await user.paste("Stripe");
+    await user.click(screen.getByLabelText("Job description"));
+    await user.paste(notes);
+    await user.click(screen.getByRole("button", { name: "Draft rubric" }));
+
+    expect(await screen.findByRole("heading", { name: "Review the rubric" })).toBeTruthy();
+    expect(screen.queryByText("Connect ChatGPT or an API key to draft a rubric.")).toBeNull();
   });
 });

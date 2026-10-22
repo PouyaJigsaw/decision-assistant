@@ -1,6 +1,6 @@
 import { formatUsd, type Action } from "@decision-assistant/domain";
 import { useEffect, useState } from "react";
-import { evaluatedForCopy, PRODUCT_NAME, usesRemainingCopy } from "../../src/copy";
+import { evaluatedForCopy, PRODUCT_NAME } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
 const ACTION_LABEL: Record<Action, string> = {
@@ -23,14 +23,10 @@ export type HistoryRow = {
 };
 
 export function HistoryScreen({
-  usesRemaining,
-  cap = 3,
   api,
   onBack,
   onOpen,
 }: {
-  usesRemaining: number | null;
-  cap?: number | null;
   api: {
     list: () => Promise<{ evaluations: HistoryRow[]; totals: { jevUsd: number; llmUsd: number } }>;
     deleteAll: () => Promise<unknown>;
@@ -66,9 +62,6 @@ export function HistoryScreen({
         <h2>Running total</h2>
         <p>Jev {formatUsd(data.totals.jevUsd)}</p>
         <p className="lede">Totals use the price stored with each run.</p>
-        <p className="meter">
-          {usesRemainingCopy(usesRemaining, cap)}
-        </p>
       </div>
       <div className="stack">
         {data.evaluations.map((row) => {

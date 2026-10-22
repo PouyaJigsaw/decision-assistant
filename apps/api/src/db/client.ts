@@ -34,6 +34,8 @@ function migrate(db: AppDatabase): void {
       id text PRIMARY KEY,
       user_id text NOT NULL,
       title text NOT NULL,
+      company text,
+      summary text,
       created_at integer NOT NULL
     )
   `);
@@ -77,6 +79,7 @@ function migrate(db: AppDatabase): void {
       keep_extracts integer NOT NULL,
       comparison_enabled integer NOT NULL,
       notes text,
+      candidate_name text,
       created_at integer NOT NULL,
       updated_at integer NOT NULL,
       UNIQUE (user_id, idempotency_key)
@@ -99,6 +102,20 @@ function migrate(db: AppDatabase): void {
     )
   `);
   db.run(sql`
+    CREATE TABLE IF NOT EXISTS hosted_role_uses (
+      id text PRIMARY KEY,
+      user_id text NOT NULL,
+      role_id text NOT NULL UNIQUE,
+      created_at integer NOT NULL
+    )
+  `);
+  addColumnIfMissing(db, "users", "trial_success_cap", "integer");
+  addColumnIfMissing(db, "roles", "company", "text");
+  addColumnIfMissing(db, "roles", "summary", "text");
+  addColumnIfMissing(db, "roles", "notes", "text");
+  addColumnIfMissing(db, "evaluations", "candidate_name", "text");
+  addColumnIfMissing(db, "evaluations", "role_title", "text");
+  db.run(sql`
     CREATE TABLE IF NOT EXISTS spend_events (
       id text PRIMARY KEY,
       user_id text NOT NULL,
@@ -110,4 +127,12 @@ function migrate(db: AppDatabase): void {
       llm_output_usd real
     )
   `);
+}
+
+function addColumnIfMissing(db: AppDatabase, table: string, column: string, definition: string) {
+  try {
+    db.run(sql.raw(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`));
+  } catch {
+    // Column already exists on this file.
+  }
 }

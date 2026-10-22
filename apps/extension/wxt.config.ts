@@ -14,7 +14,15 @@ export function manifestForOrigin(origin: string) {
     version: "0.0.1",
     icons,
     action: { default_title: PRODUCT_NAME, default_icon: icons },
-    permissions: ["sidePanel", "activeTab", "scripting", "storage", "tabs", "webNavigation"],
+    permissions: [
+      "sidePanel",
+      "activeTab",
+      "scripting",
+      "storage",
+      "tabs",
+      "webNavigation",
+      "declarativeNetRequestWithHostAccess",
+    ],
     host_permissions: [
       `${apiOrigin(origin)}/*`,
       "https://www.linkedin.com/*",

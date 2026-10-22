@@ -14,7 +14,6 @@ import {
   evaluatedForCopy,
   PRODUCT_NAME,
   reasonCopy,
-  usesRemainingCopy,
 } from "../../src/copy";
 import { PanelHeader } from "./PanelHeader";
 
@@ -103,7 +102,6 @@ export function ResultScreen({
   onOpenHistory,
   onHome,
   onBack,
-  cap = 3,
   billing,
 }: {
   evaluation: ResultEvaluation;
@@ -118,7 +116,6 @@ export function ResultScreen({
   onOpenHistory?: () => void;
   onHome?: () => void;
   onBack?: () => void;
-  cap?: number | null;
   billing?: string;
 }) {
   const [note, setNote] = useState("");
@@ -188,9 +185,6 @@ export function ResultScreen({
           </>
         ) : null}
         <p className="lede">Jev does not write text. Its output tokens are counted and not billed.</p>
-        <p>
-          {usesRemainingCopy(evaluation.usesRemaining, cap)}
-        </p>
       </article>
       <textarea
         placeholder="Add a note. Nothing is sent to the candidate."

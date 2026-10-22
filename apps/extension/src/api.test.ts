@@ -144,6 +144,36 @@ describe("createApi", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("omits completion from a hosted rubric draft", async () => {
+    const { createApi } = await import("./api");
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.endsWith("/v1/roles/r1/rubric-drafts") && init?.method === "POST") {
+        expect(JSON.parse(String(init.body))).toEqual({
+          notes: "Need Go.",
+          title: "Forward Deployed Engineer",
+          company: "AIM",
+        });
+        return new Response(JSON.stringify({ criteria: [] }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createApi("http://127.0.0.1:8787", {
+      get: async () => "tok-1",
+      set: async () => undefined,
+      clear: async () => undefined,
+    });
+    await api.draftRubric("r1", "Need Go.", undefined, {
+      title: "Forward Deployed Engineer",
+      company: "AIM",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("gets one evaluation from /v1/evaluations/:id", async () => {
     const { createApi } = await import("./api");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {

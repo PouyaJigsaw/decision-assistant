@@ -3,13 +3,15 @@ import { TRIAL_SUCCESS_CAP } from "./constants";
 export function preflight(input: {
   evaluationsEnabled: boolean;
   successCount: number;
+  successCap?: number | null;
 }):
   | { proceed: true }
   | { proceed: false; reason: "kill_switch" | "trial_cap"; countsAsUse: false; completedRefusal: boolean } {
   if (!input.evaluationsEnabled) {
     return { proceed: false, reason: "kill_switch", countsAsUse: false, completedRefusal: false };
   }
-  if (input.successCount >= TRIAL_SUCCESS_CAP) {
+  const successCap = input.successCap === undefined ? TRIAL_SUCCESS_CAP : input.successCap;
+  if (successCap != null && input.successCount >= successCap) {
     return { proceed: false, reason: "trial_cap", countsAsUse: false, completedRefusal: true };
   }
   return { proceed: true };
@@ -19,8 +21,9 @@ export function countsAsUse(input: { jevValid: boolean; idempotencyReplay: boole
   return input.jevValid && !input.idempotencyReplay;
 }
 
-export function usesRemaining(successCount: number): number {
-  return Math.max(0, TRIAL_SUCCESS_CAP - successCount);
+export function usesRemaining(successCount: number, successCap: number | null = TRIAL_SUCCESS_CAP): number | null {
+  if (successCap == null) return null;
+  return Math.max(0, successCap - successCount);
 }
 
 export function normalizeText(text: string): string {

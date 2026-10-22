@@ -1,5 +1,5 @@
 import { formatUsd, type Action } from "@decision-assistant/domain";
-import { evaluatedForCopy, PRODUCT_NAME, usesRemainingCopy } from "../../src/copy";
+import { evaluatedForCopy, PRODUCT_NAME, rolesRemainingCopy } from "../../src/copy";
 import type { HistoryRow } from "./HistoryScreen";
 import { PanelHeader } from "./PanelHeader";
 
@@ -12,16 +12,14 @@ const ACTION_LABEL: Record<Action, string> = {
 
 export function DashboardScreen({
   email,
-  usesRemaining,
-  cap = 3,
+  rolesRemaining,
+  roleCap = 3,
   totals,
-  sitting,
   roles,
   recent,
   error,
   onNewJob,
   onModel,
-  onContinue,
   onOpenRole,
   onOpen,
   onHistory,
@@ -29,40 +27,30 @@ export function DashboardScreen({
   onSignOut,
 }: {
   email: string;
-  usesRemaining: number | null;
-  cap?: number | null;
+  rolesRemaining: number | null;
+  roleCap?: number | null;
   totals: { jevUsd: number; llmUsd: number };
-  sitting?: { title: string; company?: string } | null;
   roles: { id: string; title: string; company?: string; summary?: string }[];
   recent: HistoryRow[];
   error?: string;
   onModel?: () => void;
   onNewJob: () => void;
-  onContinue?: () => void;
   onOpenRole?: (id: string) => void;
   onOpen: (id: string) => void;
   onHistory?: () => void;
   onDeleteRoles?: () => void;
   onSignOut: () => void;
 }) {
+  const remaining = rolesRemainingCopy(rolesRemaining, roleCap);
   return (
     <section className="panel">
       <PanelHeader title={PRODUCT_NAME} subtitle={email} />
-      <p className="meter">
-        {usesRemainingCopy(usesRemaining, cap)}
-      </p>
+      {remaining ? <p className="meter">{remaining}</p> : null}
       <article className="card">
         <h2>Running total</h2>
         <p>Jev {formatUsd(totals.jevUsd)}</p>
         <p className="lede">Totals use the price stored with each run.</p>
       </article>
-      {sitting ? (
-        <button className="card" type="button" onClick={() => onContinue?.()}>
-          <h3>Continue sitting</h3>
-          <p>{sitting.title}</p>
-          {sitting.company ? <p>{sitting.company}</p> : null}
-        </button>
-      ) : null}
       <button className="primary" type="button" onClick={onNewJob}>
         New job description
       </button>

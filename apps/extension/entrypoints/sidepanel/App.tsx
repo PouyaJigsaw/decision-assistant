@@ -148,8 +148,8 @@ export function App() {
   const [extract, setExtract] = useState<ExtractRecord | null>(null);
   const [evaluation, setEvaluation] = useState<ResultEvaluation | null>(null);
   const [panelError, setPanelError] = useState<PanelError | null>(null);
-  const [usesRemaining, setUsesRemaining] = useState<number | null | undefined>();
-  const [trialCap, setTrialCap] = useState<number | null>(3);
+  const [rolesRemaining, setRolesRemaining] = useState<number | null>(null);
+  const [roleCap, setRoleCap] = useState<number | null>(3);
   const [evalKey, setEvalKey] = useState<string | null>(null);
   const [evalBody, setEvalBody] = useState<EvaluateBody | null>(null);
   const [captureError, setCaptureError] = useState<string | undefined>();
@@ -179,8 +179,8 @@ export function App() {
     try {
       const me = await api.me();
       setEmail(me.email);
-      setUsesRemaining(me.usesRemaining);
-      setTrialCap(me.cap ?? null);
+      setRolesRemaining(me.rolesRemaining ?? null);
+      setRoleCap(me.roleCap ?? null);
     } catch {
       setScreen("signin");
       return;
@@ -277,14 +277,11 @@ export function App() {
         setEvaluation(withLabels(result, criteriaRef.current));
         setOpenedFromHistory(false);
         setOpenedFromDashboard(false);
-        setUsesRemaining(result.usesRemaining);
         setEvalKey(null);
         setScreen("result");
       } catch (error) {
         if (error instanceof ApiError) {
-          const bodyJson = error.body && typeof error.body === "object" ? (error.body as { usesRemaining?: number }) : {};
           setPanelError({ status: error.status, body: error.body });
-          if (typeof bodyJson.usesRemaining === "number") setUsesRemaining(bodyJson.usesRemaining);
           setScreen("error");
           return;
         }
@@ -298,13 +295,9 @@ export function App() {
   const roleApi = useMemo(
     () => ({
       async draftRubric(body: DraftRequest) {
-        if (needsModel()) {
-          setScreen("connection");
-          throw new Error("llm_not_connected");
-        }
         setJobNotes(body.notes);
         const posting = parseJobPosting(body.notes);
-        const completion = await completeDraft(kv, oauthHost, body.notes);
+        const completion = needsModel() ? undefined : await completeDraft(kv, oauthHost, body.notes);
         const typed = { title: body.roleName, company: body.company, summary: posting.summary };
         if (role) {
           const next = { ...role, ...typed, notes: body.notes };
@@ -458,15 +451,6 @@ export function App() {
     }
   }
 
-  async function continueSitting() {
-    const next = await loadExtract();
-    if (next) {
-      startEvaluate(next);
-      return;
-    }
-    setScreen("sitting");
-  }
-
   function editJobDescription(from: "sitting" | "dashboard" = "sitting") {
     setRoleFrom(from);
     setJobNotes(jobDescriptionFor(role, jobNotes));
@@ -548,10 +532,9 @@ export function App() {
     return (
       <DashboardScreen
         email={email}
-        usesRemaining={usesRemaining ?? null}
-        cap={trialCap}
+        rolesRemaining={needsModel() ? rolesRemaining : null}
+        roleCap={needsModel() ? roleCap : null}
         totals={totals}
-        sitting={role && rubricId ? { title: role.title, company: role.company } : null}
         roles={roles}
         recent={recent}
         error={dashboardError}
@@ -559,7 +542,6 @@ export function App() {
         onModel={() => {
           void refreshConnection().then(() => setScreen("connection"));
         }}
-        onContinue={() => void continueSitting()}
         onOpenRole={(id) => void openSavedRole(id)}
         onDeleteRoles={() => {
           void (async () => {
@@ -680,8 +662,6 @@ export function App() {
     return (
       <ErrorScreen
         error={panelError}
-        usesRemaining={usesRemaining}
-        cap={trialCap}
         onBack={backToSitting}
         onManageUsage={() => {
           void chrome.tabs.create({ url: CHATGPT_USAGE_URL });
@@ -711,7 +691,6 @@ export function App() {
         onRecapture={recaptureFromResult}
         onChangeJob={() => void startNewJob()}
         captureError={captureError}
-        cap={trialCap}
         onOpenHistory={
           openedFromDashboard
             ? undefined
@@ -740,15 +719,13 @@ export function App() {
   if (screen === "history") {
     return (
       <HistoryScreen
-        usesRemaining={usesRemaining ?? null}
-        cap={trialCap}
         api={{
           list: () => api.listEvaluations(),
           deleteAll: async () => {
             await api.deleteEvaluations();
             const me = await api.me();
-            setUsesRemaining(me.usesRemaining);
-            setTrialCap(me.cap ?? null);
+            setRolesRemaining(me.rolesRemaining ?? null);
+            setRoleCap(me.roleCap ?? null);
           },
         }}
         onBack={() => setScreen(historyFrom === "dashboard" ? "dashboard" : evaluation ? "result" : "sitting")}

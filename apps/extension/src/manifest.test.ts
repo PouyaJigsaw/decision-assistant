@@ -4,7 +4,15 @@ import { manifestForOrigin } from "../wxt.config";
 describe("manifest", () => {
   it("grants only the listed permissions and registers no content scripts", () => {
     const manifest = manifestForOrigin("http://127.0.0.1:8787");
-    expect(manifest.permissions).toEqual(["sidePanel", "activeTab", "scripting", "storage", "tabs", "webNavigation"]);
+    expect(manifest.permissions).toEqual([
+      "sidePanel",
+      "activeTab",
+      "scripting",
+      "storage",
+      "tabs",
+      "webNavigation",
+      "declarativeNetRequestWithHostAccess",
+    ]);
     expect(manifest.host_permissions).toEqual([
       "http://127.0.0.1:8787/*",
       "https://www.linkedin.com/*",
