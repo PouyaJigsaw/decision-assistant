@@ -39,15 +39,49 @@ The LinkedIn host permission plus `scripting` exists so the panel can read the f
 
 ## Install the Chrome extension
 
-The Chrome Web Store listing is not published yet. Grab the packaged build from [Releases](https://github.com/PouyaJigsaw/decision-assistant/releases/latest):
+There is no Chrome Web Store listing yet. Install the packaged build from GitHub.
 
-1. Download `who-fits-*-chrome.zip` and unzip it into its own folder.
-2. Open `chrome://extensions`, turn on **Developer mode**, and click **Load unpacked**.
-3. Select that unzipped folder (it must contain `manifest.json`).
+### 1. Download the zip
 
-Chrome does not install a `.zip` directly. The release build talks to the hosted API at `https://decision-assistant.fly.dev`. Use **Run locally** below only when you want to point the panel at your own API.
+Open the [latest release](https://github.com/PouyaJigsaw/decision-assistant/releases/latest). Under **Assets**, download `who-fits-*-chrome.zip` (for example [`who-fits-0.0.1-chrome.zip`](https://github.com/PouyaJigsaw/decision-assistant/releases/download/v0.0.1/who-fits-0.0.1-chrome.zip)).
 
-Pushing a `v*` tag builds this zip in CI and attaches it to a GitHub release.
+Do not use **Source code (zip)**. That is the repository, not the extension.
+
+### 2. Unzip it into its own folder
+
+The archive has `manifest.json` at the top level. Unzip into an empty folder and leave that folder on disk. Chrome loads the extension from that path; moving or deleting it breaks the install.
+
+- macOS: double-click the zip, or run `unzip who-fits-*-chrome.zip -d who-fits`
+- Windows: right-click → **Extract All** and choose a new folder
+
+You should see `manifest.json`, `background.js`, and `sidepanel.html` in that folder.
+
+### 3. Load it in Chrome
+
+1. Go to `chrome://extensions`.
+2. Turn on **Developer mode** (top right).
+3. Click **Load unpacked**.
+4. Select the unzipped folder (the one that contains `manifest.json`).
+
+Chrome may show “Disable developer mode extensions” on later launches. That warning is expected for an unpacked install. Keep Developer mode on.
+
+Pin Who Fits? from the puzzle-piece menu if you want the toolbar icon visible.
+
+### 4. Use it
+
+This build talks to the hosted API at [https://decision-assistant.fly.dev](https://decision-assistant.fly.dev). You do not need to run the API yourself.
+
+1. Open a LinkedIn profile (`linkedin.com/in/...`).
+2. Click the Who Fits? toolbar icon. The side panel opens and reads that tab only because you clicked.
+3. Choose **Sign up**, enter an email and a password of at least 8 characters, then **Create account**. Use **Sign in** if you already have an account.
+4. Paste a full job description (at least 150 words), draft the rubric, edit it, and approve it.
+5. With the LinkedIn profile still focused, use **Read this tab** / evaluate. Jev answers the rubric. The panel recommends **Contact**, **Investigate**, **Save for later**, or **Skip**.
+
+Nothing is messaged to the candidate. ChatGPT or an OpenAI API key is optional and stays in the browser.
+
+To rebuild from source and point at your own API instead, use **Run locally** below.
+
+Pushing a `v*` tag builds a new zip in CI and attaches it to a GitHub release.
 
 ## Run locally
 
