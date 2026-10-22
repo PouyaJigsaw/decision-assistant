@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm --filter @decision-assistant/extension zip
+      - name: Publish GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          src="$(ls apps/extension/unpacked/*-chrome.zip | head -n 1)"
+          asset="who-fits-${version}-chrome.zip"
+          cp "$src" "$asset"
+          {
+            echo "Chrome MV3 build of Who Fits?, pointed at https://decision-assistant.fly.dev."
+            echo
+            echo "1. Download \`${asset}\` and unzip it into its own folder."
+            echo "2. Open \`chrome://extensions\`, enable Developer mode, and choose **Load unpacked**."
+            echo "3. Select the unzipped folder (the one that contains \`manifest.json\`)."
+            echo
+            echo "Chrome does not install a \`.zip\` directly. This is not a Chrome Web Store listing."
+          } > release-notes.md
+          gh release create "$GITHUB_REF_NAME" "$asset" \
+            --title "Who Fits? ${GITHUB_REF_NAME}" \
+            --notes-file release-notes.md \
+            --verify-tag

@@ -37,6 +37,18 @@ ChatGPT or an OpenAI API key is optional and stays in the browser. Without a con
 
 The LinkedIn host permission plus `scripting` exists so the panel can read the focused profile after the recruiter chooses to capture it. The extension does not run content scripts on every page load and does not message candidates.
 
+## Install the Chrome extension
+
+The Chrome Web Store listing is not published yet. Grab the packaged build from [Releases](https://github.com/PouyaJigsaw/decision-assistant/releases/latest):
+
+1. Download `who-fits-*-chrome.zip` and unzip it into its own folder.
+2. Open `chrome://extensions`, turn on **Developer mode**, and click **Load unpacked**.
+3. Select that unzipped folder (it must contain `manifest.json`).
+
+Chrome does not install a `.zip` directly. The release build talks to the hosted API at `https://decision-assistant.fly.dev`. Use **Run locally** below only when you want to point the panel at your own API.
+
+Pushing a `v*` tag builds this zip in CI and attaches it to a GitHub release.
+
 ## Run locally
 
 Requires Node 20+ and [pnpm](https://pnpm.io) 9.15.
