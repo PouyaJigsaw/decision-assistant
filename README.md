@@ -10,9 +10,9 @@ The extension reads the open LinkedIn profile only after the recruiter chooses t
 
 Hosted API: [https://decision-assistant.fly.dev](https://decision-assistant.fly.dev) · Privacy: [https://decision-assistant.fly.dev/privacy](https://decision-assistant.fly.dev/privacy)
 
-![Who Fits? product page](docs/screenshots/product.png)
+![Who Fits? side panel next to a LinkedIn profile, with an approved rubric and Read this tab](docs/screenshots/product.png)
 
-![Who Fits? privacy policy](docs/screenshots/privacy.png)
+![Who Fits? Investigate result on a LinkedIn profile, with criterion answers and a 75 of 100 score](docs/screenshots/privacy.png)
 
 ## Architecture
 
